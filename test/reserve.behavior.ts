@@ -29,8 +29,11 @@ describe("WarrantyReserve M1 behavior", async function () {
     const walletClients = await viem.getWalletClients();
     const merchant = walletClients[0];
     const claimant = walletClients[1].account.address;
+    const evaluator = walletClients[9].account.address;
     const publicClient = await viem.getPublicClient();
-    const reserve = await viem.deployContract("WarrantyReserve");
+    // M1 behavior does not exercise claims, so the evaluator signer is only a
+    // non-zero constructor input here; the claim suite verifies its use.
+    const reserve = await viem.deployContract("WarrantyReserve", [evaluator]);
     return { merchant, claimant, publicClient, reserve };
   }
 
@@ -348,7 +351,8 @@ describe("WarrantyReserve M1 behavior", async function () {
     const merchantA = walletClients[0];
     const merchantB = walletClients[1];
     const claimant = walletClients[2].account.address;
-    const reserve = await viem.deployContract("WarrantyReserve");
+    const evaluator = walletClients[9].account.address;
+    const reserve = await viem.deployContract("WarrantyReserve", [evaluator]);
 
     // A second contract handle bound to merchantB's wallet so its writes are
     // sent from merchantB, not the default account.

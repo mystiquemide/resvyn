@@ -28,7 +28,10 @@ describe("WarrantyReserve M1 invariants", async function () {
     const walletClients = await viem.getWalletClients();
     const merchant = walletClients[0];
     const claimant = walletClients[1].account.address;
-    const reserve = await viem.deployContract("WarrantyReserve");
+    // The evaluator signer is only a non-zero constructor input for M1
+    // invariants; the claim suite verifies its use.
+    const evaluator = walletClients[9].account.address;
+    const reserve = await viem.deployContract("WarrantyReserve", [evaluator]);
     return { merchant, claimant, reserve };
   }
 

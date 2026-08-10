@@ -1,21 +1,48 @@
 import { network } from "hardhat";
 import { formatEther, isAddress } from "viem";
 
-// BOT Mainnet preflight (read only). Confirms the botMainnet connection reaches
-// chain ID 677 and reports the native BOT balance of each address supplied in
-// the BOT_PREFLIGHT_ADDRESSES env var (comma-separated). It reads public chain
+// BOT preflight (read only). Confirms the connection reaches the expected chain
+// and reports the native BOT balance of each address supplied in the
+// BOT_PREFLIGHT_ADDRESSES env var (comma-separated). It reads public chain
 // state only: no private key is used, no keystore is opened, and no transaction
 // is ever sent. This is the tool that clears BLK-001 once the deployer,
-// merchant, and buyer addresses are known.
+// merchant, and buyer addresses are known, and the same tool that confirms
+// tBOT funding before the Testnet rehearsal.
 //
-// Usage:
+// Network selection: set BOT_PREFLIGHT_NETWORK to botMainnet (default, chain
+// 677) or botTestnet (chain 968). Hardhat 3's `run` does not forward its
+// --network flag to network.connect(), so selection is explicit via this env
+// var. The expected chain id is derived from it, so a wrong RPC URL fails
+// loudly instead of silently checking balances on the wrong chain.
+//
+// Usage (Mainnet):
 //   BOT_MAINNET_RPC_URL=<rpc> \
 //   BOT_PREFLIGHT_ADDRESSES=0xdeployer,0xmerchant,0xbuyer \
 //   npx hardhat run scripts/preflight.ts --network botMainnet
+//
+// Usage (Testnet):
+//   BOT_PREFLIGHT_NETWORK=botTestnet \
+//   BOT_TESTNET_RPC_URL=https://rpc.bohr.life \
+//   BOT_PREFLIGHT_ADDRESSES=0xdeployer,0xmerchant,0xbuyer \
+//   npx hardhat run scripts/preflight.ts --network botTestnet
 
-const EXPECTED_CHAIN_ID = 677;
+const EXPECTED_CHAIN_ID: Record<string, number> = {
+  botMainnet: 677,
+  botTestnet: 968,
+};
 
 async function main() {
+  // Explicit network selection (see header). Default botMainnet so existing
+  // Mainnet usage is unchanged.
+  const networkName = process.env.BOT_PREFLIGHT_NETWORK ?? "botMainnet";
+  const expectedChainId = EXPECTED_CHAIN_ID[networkName];
+  if (expectedChainId === undefined) {
+    throw new Error(
+      `Unknown network "${networkName}". Set BOT_PREFLIGHT_NETWORK to ` +
+        `botMainnet or botTestnet.`,
+    );
+  }
+
   const raw = process.env.BOT_PREFLIGHT_ADDRESSES ?? "";
   const addresses = raw
     .split(",")
@@ -28,22 +55,24 @@ async function main() {
   }
 
   const connection = await network.connect({
-    network: "botMainnet",
+    network: networkName,
     chainType: "l1",
   });
   const client = await connection.viem.getPublicClient();
 
   const chainId = await client.getChainId();
   const blockNumber = await client.getBlockNumber();
+  const gasPrice = await client.getGasPrice();
 
-  console.log(`Connected to botMainnet`);
+  console.log(`Connected to ${networkName}`);
   console.log(`  chainId:     ${chainId}`);
   console.log(`  blockNumber: ${blockNumber}`);
+  console.log(`  gasPrice:    ${formatEther(gasPrice)} BOT`);
 
-  if (chainId !== EXPECTED_CHAIN_ID) {
+  if (chainId !== expectedChainId) {
     throw new Error(
-      `Wrong chain: expected ${EXPECTED_CHAIN_ID}, connected to ${chainId}. ` +
-        `Check BOT_MAINNET_RPC_URL.`,
+      `Wrong chain: expected ${expectedChainId} for ${networkName}, ` +
+        `connected to ${chainId}. Check the RPC URL env var.`,
     );
   }
 

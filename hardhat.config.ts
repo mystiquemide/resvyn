@@ -1,11 +1,13 @@
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import { configVariable, defineConfig } from "hardhat/config";
 
-// Milestone 2 configuration adds the BOT Chain Mainnet network (chain ID 677).
-// This entry is config only: it defines the network and reads its RPC URL from
-// the BOT_MAINNET_RPC_URL environment variable. It performs no deployment and
-// funds no wallet. Accounts are intentionally omitted until BLK-001 (Mainnet
-// wallet roles and BOT balances) is resolved, so no signing key is referenced.
+// Milestone 2/3 configuration adds the BOT Chain networks. Both entries are
+// config only: they define the network and read the RPC URL from an env var.
+// They perform no deployment and fund no wallet. Accounts are intentionally
+// omitted so no signing key is referenced here; the deployer/relayer key is
+// supplied at run time by the operator, never stored in the repo.
+//   botMainnet (chain 677): the single Mainnet proof target.
+//   botTestnet (chain 968): the free dress-rehearsal target (valueless tBOT).
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin],
   solidity: {
@@ -34,6 +36,12 @@ export default defineConfig({
       chainType: "l1",
       chainId: 677,
       url: configVariable("BOT_MAINNET_RPC_URL"),
+    },
+    botTestnet: {
+      type: "http",
+      chainType: "l1",
+      chainId: 968,
+      url: configVariable("BOT_TESTNET_RPC_URL"),
     },
   },
 });
