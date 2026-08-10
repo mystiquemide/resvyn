@@ -1,0 +1,40 @@
+# Node modules
+/node_modules
+
+# Compilation output
+/dist
+
+# Hardhat build artifacts
+/artifacts
+
+# Hardhat v2 cache support directory
+/cache
+
+# Typechain output
+/types
+
+# Environment files (secrets never committed)
+.env
+.env.*
+!.env.example
+
+# Hardhat coverage reports
+/coverage
+
+# Gas snapshot files
+/.gas-snapshot
+
+# Snapshot cheatcodes output
+/snapshots
+
+# Logs
+*.log
+
+# Internal execution docs (kept local, not pushed to the public repo)
+/PROJECT_PLAN.MD
+/PROJECT_STATE.MD
+/FUNDING.md
+
+# Keep all local markdown docs out of the repo
+*.md
+*.MD

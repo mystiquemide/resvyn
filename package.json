@@ -1,0 +1,20 @@
+{
+  "name": "resvyn",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Resvyn - merchant-funded warranty reserve on BOT Chain. No funded reserve, no valid coverage.",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:contracts": "hardhat test",
+    "test:invariants": "hardhat test nodejs"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "5.0.7",
+    "@types/node": "^22.20.1",
+    "hardhat": "3.12.0",
+    "typescript": "~6.0.3",
+    "viem": "2.55.11"
+  }
+}
