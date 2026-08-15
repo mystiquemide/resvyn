@@ -52,7 +52,13 @@ before public disclosure unless coordinated otherwise.
   `RESVYN_EVIDENCE_STORE_PATH` (default `./data/evidence-store.json`, atomic
   replace). A multi-instance deployment must share that volume or use a
   shared store; the server does not silently drop attested evidence on
-  restart.
+  restart. Writes are DISK-FIRST and fail closed: if the disk write fails
+  the route returns 503 and stores nothing (the client can retry).
+- **Evidence recovery (REV-016):** after a reload, `GET /api/evidence`
+  returns the claim's stored record, so the console re-enables evaluation
+  from the server-owned store instead of stranding the flow; a 409
+  `evidence_conflict` on attestation is treated as already-attested by the
+  client.
 - **Fail-closed evaluation (REV-006):** when the optional Groq brain is
   configured and the provider fails (HTTP error, timeout, malformed output,
   schema failure), no signature is returned. An outage pauses the Groq path;

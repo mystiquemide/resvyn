@@ -160,7 +160,13 @@ npm run dev
 Server env for the evaluator route (never committed): `RESVYN_EVALUATOR_KEY`
 (required to sign), `RESVYN_GROQ_KEY` (optional brain), `RESVYN_RATE_LIMIT_*`,
 `RESVYN_TRUST_PROXY`, `RESVYN_EVIDENCE_STORE_PATH` (durable evidence store,
-default `./data/evidence-store.json`).
+default `./data/evidence-store.json`; writes fail closed if the disk is
+unwritable).
+
+The evidence flow survives reloads: the console queries
+`GET /api/evidence?coverageId&claimId` when claim references change and
+re-enables evaluation from the server-owned record, so a page refresh never
+strands a claim that was already attested.
 
 ## Rehearsal
 

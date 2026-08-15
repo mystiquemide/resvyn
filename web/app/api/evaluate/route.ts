@@ -16,7 +16,7 @@ import {
 } from "@/lib/evaluator.server"
 import { groqBrain, isGroqConfigured } from "@/lib/groqBrain"
 import { getEvidence, getSeenEvidenceHashes } from "@/lib/evidenceStore"
-import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds, consumeGlobalBudget } from "@/lib/rateLimit"
+import { checkClientLimit, clientKeyFromRequest, claimKeyFromIds, consumeClaimBudget, consumeGlobalBudget } from "@/lib/rateLimit"
 import {
   AttestationError,
   verifyEvaluateAuthorization,
@@ -94,23 +94,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bad_request", message: "coverageId and claimId must be positive integers." }, { status: 400 })
   }
 
-  // 1) Rate limit: the signing endpoint must not be freely spammable. 429 with
-  //    Retry-After when a client exceeds a budget. The client key only uses
-  //    forwarding headers behind a trusted proxy (REV-005); the per-claim
-  //    budget applies regardless of identity.
-  const limit = checkRateLimit(
-    clientKeyFromRequest(req),
-    claimKeyFromIds(coverageId, claimId),
-  )
+  // 1) Cheap per-client rate limit (REV-005). The client key only uses
+  //    forwarding headers behind a trusted proxy; the per-claim and global
+  //    budgets are consumed AFTER authorization and at the signing point
+  //    (rounds 3/4), so invalid signatures or cheap floods cannot exhaust
+  //    them.
+  const limit = checkClientLimit(clientKeyFromRequest(req))
   if (!limit.allowed) {
     return NextResponse.json(
       {
         error: "rate_limited",
-        message: `Too many evaluate requests. Retry in ${Math.ceil(limit.retryAfterMs / 1000)}s.`,
+        message: `Too many evaluate requests. Retry in ${Math.ceil((limit.retryAfterMs ?? 1000) / 1000)}s.`,
       },
       {
         status: 429,
-        headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) },
+        headers: { "Retry-After": String(Math.ceil((limit.retryAfterMs ?? 1) / 1000)) },
       },
     )
   }
@@ -304,19 +302,33 @@ export async function POST(req: Request) {
   //     second claim is rejected as DUPLICATE_EVIDENCE instead of passing.
   const seenHashes = getSeenEvidenceHashes(claimId.toString())
 
-  // 12) REV-005 round 3: the global signing budget is consumed ONLY at the
-  //     point of signing, so an unauthenticated flood of valid-looking
-  //     requests cannot exhaust it for legitimate users.
+  // 12) REV-005 rounds 3/4: the claim budget is consumed only AFTER the
+  //     authorization verified (invalid signatures cannot burn a known
+  //     claim's allowance), and the global signing budget only at the point
+  //     of signing. Neither is consumed by cheap or rejected requests.
+  const claimLimit = consumeClaimBudget(claimKeyFromIds(coverageId, claimId))
+  if (!claimLimit.allowed) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: `Too many requests for this claim. Retry in ${Math.ceil((claimLimit.retryAfterMs ?? 1000) / 1000)}s.`,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil((claimLimit.retryAfterMs ?? 1) / 1000)) },
+      },
+    )
+  }
   const global = consumeGlobalBudget()
   if (!global.allowed) {
     return NextResponse.json(
       {
         error: "rate_limited",
-        message: `Server is at capacity. Retry in ${Math.ceil(global.retryAfterMs / 1000)}s.`,
+        message: `Server is at capacity. Retry in ${Math.ceil((global.retryAfterMs ?? 1000) / 1000)}s.`,
       },
       {
         status: 429,
-        headers: { "Retry-After": String(Math.ceil(global.retryAfterMs / 1000)) },
+        headers: { "Retry-After": String(Math.ceil((global.retryAfterMs ?? 1) / 1000)) },
       },
     )
   }

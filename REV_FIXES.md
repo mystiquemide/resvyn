@@ -3,13 +3,15 @@
 This file records how each finding from the review in `CODE_REVIEW.md`
 (PR #1) was addressed, plus the round-2 re-audit findings on PR #2
 (REV-001r2, REV-002r2, REV-005r2, REV-007r2, REV-009r2, REV-013r2, and the
-Paymaster log item) and the round-3 re-audit findings on PR #2 head
-ef58d71 (REV-001r3, REV-016, REV-017, REV-002r3, REV-005r3, durable
-evidence storage). Each entry lists the fix and its verification.
+Paymaster log item), the round-3 findings on head ef58d71 (REV-001r3,
+REV-016, REV-017, REV-002r3, REV-005r3, durable evidence storage), and the
+round-4 findings on head bb9a4d2 (evidence recovery, fail-closed
+persistence, budget ordering, anonymous per-claim exhaustion, build
+tracing). Each entry lists the fix and its verification.
 
 ## High
 
-### REV-001: Public evaluator endpoint signs caller-controlled eligibility — FIXED (round 3)
+### REV-001: Public evaluator endpoint signs caller-controlled eligibility — FIXED (round 3, unchanged in round 4)
 
 Round 2 moved the facts OUT of the evaluate request into a server-owned
 evidence store, but the claimant still chose the facts at intake. The round-3
@@ -72,6 +74,40 @@ Round 3 changes WHAT is verified, not just WHO signs:
   disabled until the operator pins the expected signer. The gate useMemo
   dependency array now includes `signerOk`.
 
+### REV-016 round 4 (recovery): Evidence snapshot is recoverable after reload — FIXED
+- **Server-side rehydration:** new `GET /api/evidence?coverageId&claimId`
+  returns the stored record (attested flag, content, derived checks) for a
+  claim. `AppConsole` queries it whenever the claim references change, so
+  after a reload the panel re-enables Evaluate from the server-owned record
+  instead of stranding the flow.
+- **409 recovery:** when attestation returns `evidence_conflict` (a previous
+  intake succeeded before a reload), the UI treats the claim as attested and
+  enables Evaluate.
+- **Stable snapshot:** the evidence content is still built ONCE at claim
+  opening (issuedAt fixed at snapshot time) and reused for attestation, so
+  the on-chain hash and the attested content can never drift.
+- Tests: `route.test.ts` — GET reports attested=false with no record,
+  attested=true with content after intake, claim-bound lookup (same hash on
+  a different claim reports unattested).
+
+### REV-017: Evidence records are not claim-bound — FIXED (round 3, extended in round 4)
+- Records carry `claimId`/`coverageId`; `/api/evaluate` refuses
+  `evidence_claim_mismatch` for cross-claim reuse, and `getSeenEvidenceHashes`
+  seeds the policy's duplicate-evidence set per claim.
+- Round 4: `getEvidenceByClaim()` + the claim index make the store
+  queryable by claim for rehydration.
+
+### Persistence round 4 (fail-closed): an unwritable store never reports success — FIXED
+- `putEvidence` is now DISK-FIRST: the record is written and atomically
+  renamed on disk BEFORE the in-memory write is committed. A failed disk
+  write returns `write_failed` and stores nothing; the route answers
+  503 `evidence_store_failed` (retryable) instead of 200.
+- The filesystem half moved to `web/lib/evidenceFs.ts`, imported
+  dynamically, so the store path stays runtime-configurable without
+  Turbopack tracing the whole project.
+- Test: a store path whose parent is a file returns 503 and stores nothing;
+  the same request succeeds once the store is healthy again.
+
 ### REV-003: Coverage expiry is stored but never enforced or released — FIXED (round 1, unchanged)
 - `contracts/WarrantyReserve.sol`: `openClaim` reverts `CoverageAlreadyExpired`
   when `block.timestamp >= cov.expiry`; new `expireCoverage()` permissionlessly
@@ -103,12 +139,34 @@ Round 3 changes WHAT is verified, not just WHO signs:
   consumed only at signing, no global burn on blocked requests, no shared
   client bucket, canonical keys.
 
-### REV-005r3 / persistence (round 3, new): Evidence persistence is not deployment-safe — FIXED
-- `web/lib/evidenceStore.ts` now persists records to a JSON file
-  (`RESVYN_EVIDENCE_STORE_PATH`, default `./data/evidence-store.json`) with
-  atomic replace on every write and load-on-start. A restart or cold start no
-  longer loses attested evidence, and the limitation note now requires a
-  shared file volume (or a shared store) for multi-instance deployments.
+### REV-005r3 / persistence (round 3, new): Evidence persistence is not deployment-safe — FIXED (rounds 3/4)
+- Round 3: records persist to a JSON file (`RESVYN_EVIDENCE_STORE_PATH`,
+  default `./data/evidence-store.json`) with atomic replace and load-on-start.
+- Round 4: persistence is FAIL-CLOSED (disk-first writes; a failed write
+  returns 503 and stores nothing) and the store is recoverable by claim
+  (GET /api/evidence). Multi-instance deployments must share the file volume
+  or use a shared store.
+
+### REV-005 round 4: Global capacity checked after evidence is stored — FIXED
+- The evidence route now consumes the global budget BEFORE the immutable
+  store write: a rate-limited intake stores nothing, so retrying works
+  instead of hitting 409.
+- Budget ordering is now: cheap per-client check early (client bucket only)
+  -> authenticate/verify -> consumeClaimBudget -> consumeGlobalBudget ->
+  write/sign. Claim and global budgets are never consumed by cheap or
+  rejected requests.
+
+### REV-005 round 4: Per-claim limits are anonymously exhaustible — FIXED
+- The per-claim budget is consumed only AFTER the attestation/authorization
+  verified, so invalid signatures can no longer burn a known claim's
+  allowance. The old `checkRateLimit(client, claim)` is split into
+  `checkClientLimit` (early), `consumeClaimBudget` (post-auth),
+  `consumeGlobalBudget` (at signing/write).
+
+### Build tracing (round 4, low): production build emitted filesystem warnings — FIXED
+- The store's fs usage moved into `web/lib/evidenceFs.ts`, imported
+  dynamically, so the runtime-configurable store path no longer makes
+  Turbopack trace the whole project. Production build is warning-free.
 
 ### REV-006: Groq/provider failures fail open to APPROVE — FIXED
 - `web/lib/groqBrain.ts`: any provider failure (HTTP, timeout, malformed,
@@ -205,8 +263,8 @@ node --test --import tsx parity/evaluator.parity.test.ts   # 7 passing
 cd web && npm ci
 npm run lint                                               # 0 errors
 npm run typecheck                                          # clean
-npm test                                                   # 44 passing
-npm run build                                              # production build
+npm test                                                   # 52 passing
+npm run build                                              # production build, warning-free
 npm audit --omit=dev                                       # 0 vulnerabilities
 ```
 

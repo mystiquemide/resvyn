@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest"
 import { privateKeyToAccount } from "viem/accounts"
 import { keccak256, stringToHex } from "viem"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { writeFileSync, rmSync } from "node:fs"
 import { evidenceContentHash, noteHash } from "@/lib/evidenceContent"
 import { resetEvidenceStoreForTests } from "@/lib/evidenceStore"
 import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
@@ -306,6 +309,89 @@ describe("POST /api/evidence (REV-001 round 2)", () => {
   })
 })
 
+describe("GET /api/evidence (REV-016 round 4: browser rehydration)", () => {
+  beforeAll(() => {
+    delete process.env.RESVYN_GROQ_KEY
+    process.env.RESVYN_RATE_LIMIT_MAX = "1000"
+    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "10000"
+    process.env.RESVYN_RATE_LIMIT_CLAIM_MAX = "10000"
+  })
+
+  beforeEach(() => {
+    resetEvidenceStoreForTests()
+    fixtureEvidenceHash = EVIDENCE_HASH
+  })
+
+  afterAll(() => {
+    delete process.env.RESVYN_GROQ_KEY
+    delete process.env.RESVYN_RATE_LIMIT_MAX
+    delete process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX
+    delete process.env.RESVYN_RATE_LIMIT_CLAIM_MAX
+    resetEvidenceStoreForTests()
+  })
+
+  async function getStatus(coverageId = "1", claimId = "1") {
+    const { GET } = await import("../evidence/route")
+    return GET(new Request(`http://localhost/api/evidence?coverageId=${coverageId}&claimId=${claimId}`))
+  }
+
+  it("reports attested=false for a claim with no record (after reload)", async () => {
+    resetEvidenceStoreForTests()
+    const res = await getStatus()
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.attested).toBe(false)
+    expect(body.coverageId).toBe("1")
+    expect(body.claimId).toBe("1")
+  })
+
+  it("reports attested=true with the stored content after intake (reload recovery)", async () => {
+    resetEvidenceStoreForTests()
+    const intake = await postIntake(await intakeBody(claimant))
+    expect(intake.status).toBe(200)
+    // Simulate a reload: the client asks the server for the record.
+    const res = await getStatus()
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.attested).toBe(true)
+    expect(body.content.productNote).toBe(evidenceContent.productNote)
+    expect(body.content.requestedAmountWei).toBe(evidenceContent.requestedAmountWei)
+    expect(body.derived.productMatches).toBe(true)
+    expect(body.derived.receiptMatches).toBe(true)
+  })
+
+  it("is claim-bound: another claim with the same hash reports unattested", async () => {
+    resetEvidenceStoreForTests()
+    await postIntake(await intakeBody(claimant)) // claim 1
+    const res = await getStatus("2", "2")
+    expect(res.status).toBe(200)
+    expect((await res.json()).attested).toBe(false)
+  })
+
+  it("fails closed with 503 when the store cannot be written (REV-005r4 persistence)", async () => {
+    resetEvidenceStoreForTests()
+    // A path whose parent is a FILE: mkdir/write fails immediately and
+    // deterministically (no /proc tricks that can hang).
+    const blocker = join(tmpdir(), `resvyn-blocker-${process.pid}`)
+    writeFileSync(blocker, "not a directory")
+    process.env.RESVYN_EVIDENCE_STORE_PATH = join(blocker, "evidence-store.json")
+    try {
+      const res = await postIntake(await intakeBody(claimant))
+      expect(res.status).toBe(503)
+      const body = await res.json()
+      expect(body.error).toBe("evidence_store_failed")
+      // Nothing was stored: a retry with a healthy store succeeds.
+      delete process.env.RESVYN_EVIDENCE_STORE_PATH
+      resetEvidenceStoreForTests()
+      const retry = await postIntake(await intakeBody(claimant))
+      expect(retry.status).toBe(200)
+    } finally {
+      delete process.env.RESVYN_EVIDENCE_STORE_PATH
+      rmSync(blocker, { force: true })
+    }
+  })
+})
+
 describe("POST /api/evaluate (REV-001 round 2)", () => {
   beforeAll(() => {
     process.env.RESVYN_EVALUATOR_KEY = EVALUATOR_KEY
@@ -536,10 +622,10 @@ describe("POST /api/evaluate deployment gate (REV-002 round 2)", () => {
 describe("rate-limit keys are canonical (REV-005 round 2)", () => {
   it("maps string id variants to the same per-claim bucket", async () => {
     const { claimKeyFromIds } = await import("@/lib/rateLimit")
-    expect(claimKeyFromIds(1n, 1n)).toBe("claim:1:1")
-    expect(claimKeyFromIds("1", "1")).toBe("claim:1:1")
+    expect(claimKeyFromIds(1n, 1n)).toBe("1:1")
+    expect(claimKeyFromIds("1", "1")).toBe("1:1")
     // The route parses ids with BigInt before rate limiting, so "01" and
     // "+1" can never reach the key builder as separate buckets.
-    expect(claimKeyFromIds(BigInt("01"), BigInt("+1"))).toBe("claim:1:1")
+    expect(claimKeyFromIds(BigInt("01"), BigInt("+1"))).toBe("1:1")
   })
 })

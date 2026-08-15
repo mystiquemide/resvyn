@@ -8,13 +8,13 @@ import {
   warrantyReserveAbi,
 } from "@/lib/chain"
 import { evidenceContentHash, noteHash, type EvidenceContent } from "@/lib/evidenceContent"
-import { putEvidence } from "@/lib/evidenceStore"
+import { getEvidenceByClaim, putEvidence } from "@/lib/evidenceStore"
 import {
   AttestationError,
   verifyEvidenceIntake,
   type EvidenceIntakeAttestation,
 } from "@/lib/evaluateAuth"
-import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds, consumeGlobalBudget } from "@/lib/rateLimit"
+import { checkClientLimit, clientKeyFromRequest, claimKeyFromIds, consumeClaimBudget, consumeGlobalBudget } from "@/lib/rateLimit"
 
 // REV-001 (round 3): server-owned evidence intake with server-derived checks.
 //
@@ -85,21 +85,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bad_request", message: "coverageId and claimId must be positive integers." }, { status: 400 })
   }
 
-  // 1) Cheap per-client/per-claim rate limit (global budget is only consumed
-  //    when a record is actually stored, REV-005 round 3).
-  const limit = checkRateLimit(
-    clientKeyFromRequest(req),
-    claimKeyFromIds(coverageId, claimId),
-  )
+  // 1) Cheap per-client rate limit (claim/global budgets are only consumed
+  //    after authentication and at the write point, REV-005 rounds 3/4).
+  const limit = checkClientLimit(clientKeyFromRequest(req))
   if (!limit.allowed) {
     return NextResponse.json(
       {
         error: "rate_limited",
-        message: `Too many requests. Retry in ${Math.ceil(limit.retryAfterMs / 1000)}s.`,
+        message: `Too many requests. Retry in ${Math.ceil((limit.retryAfterMs ?? 1000) / 1000)}s.`,
       },
       {
         status: 429,
-        headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) },
+        headers: { "Retry-After": String(Math.ceil((limit.retryAfterMs ?? 1) / 1000)) },
       },
     )
   }
@@ -190,9 +187,42 @@ export async function POST(req: Request) {
     noteHash(content.receiptNote).toLowerCase() ===
     (coverage.receiptHash as `0x${string}`).toLowerCase()
 
-  // 7) Store server-side, first-write-wins (immutable), claim-bound. The
+  // 7) REV-005 rounds 3/4: consume the claim budget only AFTER the
+  //    attestation verified (invalid signatures cannot burn a known claim's
+  //    allowance), then the global budget BEFORE the immutable write so a
+  //    rate-limited intake stores nothing and can be retried.
+  const claimLimit = consumeClaimBudget(claimKeyFromIds(coverageId, claimId))
+  if (!claimLimit.allowed) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: `Too many requests for this claim. Retry in ${Math.ceil((claimLimit.retryAfterMs ?? 1000) / 1000)}s.`,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil((claimLimit.retryAfterMs ?? 1) / 1000)) },
+      },
+    )
+  }
+  const global = consumeGlobalBudget()
+  if (!global.allowed) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: `Server is at capacity. Retry in ${Math.ceil((global.retryAfterMs ?? 1000) / 1000)}s.`,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil((global.retryAfterMs ?? 1) / 1000)) },
+      },
+    )
+  }
+
+  // 8) Store server-side, first-write-wins (immutable), claim-bound. The
   //    route hashes the content itself; the stored key is the on-chain hash.
-  const stored = putEvidence(claim.evidenceHash as `0x${string}`, {
+  //    putEvidence is DISK-FIRST and fails closed (round 4): if the disk
+  //    write fails, nothing is stored and the caller can retry.
+  const stored = await putEvidence(claim.evidenceHash as `0x${string}`, {
     content,
     derived: {
       productMatches: derivedProductMatches,
@@ -206,23 +236,21 @@ export async function POST(req: Request) {
     coverageId: coverageId.toString(),
   })
   if (!stored.ok) {
-    return NextResponse.json({ error: "evidence_conflict", message: stored.reason ?? "Evidence already stored." }, { status: 409 })
-  }
-
-  // 8) Global budget consumed only when a record is actually written
-  //    (REV-005 round 3): garbage or unauthorized requests cannot exhaust the
-  //    global signing allowance for legitimate users.
-  const global = consumeGlobalBudget()
-  if (!global.allowed) {
+    // write_failed is a 5xx (transient, retryable). conflict/full are 409:
+    // the record is immutable or the store is full.
+    if (stored.code === "write_failed") {
+      return NextResponse.json(
+        { error: "evidence_store_failed", message: stored.reason, evidenceHash: evidenceContentHash(content) },
+        { status: 503 },
+      )
+    }
     return NextResponse.json(
       {
-        error: "rate_limited",
-        message: `Server is at capacity. Retry in ${Math.ceil(global.retryAfterMs / 1000)}s.`,
+        error: "evidence_conflict",
+        message: stored.reason ?? "Evidence already stored.",
+        evidenceHash: evidenceContentHash(content),
       },
-      {
-        status: 429,
-        headers: { "Retry-After": String(Math.ceil(global.retryAfterMs / 1000)) },
-      },
+      { status: 409 },
     )
   }
 
@@ -231,5 +259,50 @@ export async function POST(req: Request) {
     evidenceHash: evidenceContentHash(content),
     submittedBy,
     derived: { productMatches: derivedProductMatches, receiptMatches: derivedReceiptMatches },
+  })
+}
+
+/**
+ * REV-016 round 4: status/recovery read for the browser flow. After a
+ * reload the React snapshot is gone; this endpoint tells the UI whether the
+ * claim already has a server-owned record (and returns the stored content)
+ * so Evaluate can be re-enabled instead of stranding the user.
+ *
+ * Read-only: no rate-limit budget is consumed (client limit only), and the
+ * archived instance is allowed to answer (the record store is the same).
+ */
+export async function GET(req: Request) {
+  const url = new URL(req.url)
+  const coverageRaw = url.searchParams.get("coverageId")
+  const claimRaw = url.searchParams.get("claimId")
+  if (!coverageRaw || !claimRaw) {
+    return NextResponse.json({ error: "bad_request", message: "coverageId and claimId are required." }, { status: 400 })
+  }
+  let coverageId: bigint, claimId: bigint
+  try {
+    coverageId = toId(coverageRaw)
+    claimId = toId(claimRaw)
+  } catch {
+    return NextResponse.json({ error: "bad_request", message: "coverageId and claimId must be positive integers." }, { status: 400 })
+  }
+
+  const limit = checkClientLimit(clientKeyFromRequest(req))
+  if (!limit.allowed) {
+    return NextResponse.json({ error: "rate_limited", message: "Too many requests." }, { status: 429 })
+  }
+
+  const record = getEvidenceByClaim(coverageId.toString(), claimId.toString())
+  if (!record) {
+    return NextResponse.json({ attested: false, coverageId: coverageId.toString(), claimId: claimId.toString() })
+  }
+  return NextResponse.json({
+    attested: true,
+    coverageId: coverageId.toString(),
+    claimId: claimId.toString(),
+    evidenceHash: evidenceContentHash(record.content),
+    content: record.content,
+    derived: record.derived,
+    submittedBy: record.submittedBy,
+    submittedAt: record.submittedAt,
   })
 }

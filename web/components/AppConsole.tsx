@@ -254,6 +254,8 @@ export default function AppConsole() {
   // REV-016: the attested flag belongs to a specific claim. Reset it whenever
   // the claim/coverage references or the evidence fields change, so a stale
   // "attested" state can never unlock evaluation for different inputs.
+  // NOTE: evidenceSnapshot is deliberately NOT a dependency - rehydration
+  // (round 4) sets the snapshot and the attested flag together.
   const [evidenceAttested, setEvidenceAttested] = useState(false)
   useEffect(() => {
     const t = setTimeout(() => {
@@ -261,7 +263,7 @@ export default function AppConsole() {
       setSigned(null)
     }, 0)
     return () => clearTimeout(t)
-  }, [evalCoverageId, evalClaimId, evidenceSnapshot, productNote, receiptNote, evidenceNote, requestedAmt, signals.damageEligible, signals.evidenceComplete, signals.fileIntegrityOk])
+  }, [evalCoverageId, evalClaimId, productNote, receiptNote, evidenceNote, requestedAmt, signals.damageEligible, signals.evidenceComplete, signals.fileIntegrityOk])
 
   // REV-002 round 2: when the operator pinned an expected evaluator signer,
   // the live on-chain signer must match it or the app renders read-only.
@@ -537,10 +539,40 @@ export default function AppConsole() {
     )
   }
 
-  // REV-001 round 3: the evidence content. productMatches is NOT a client
-  // field anymore: the server derives it by comparing noteHash(productNote)
-  // against the coverage's on-chain productHash (and receiptHash likewise).
-  // The remaining flags are self-attestations, documented as such.
+  // REV-016 (round 4): after a reload the in-memory snapshot is gone. Query
+  // the server-owned store: if the claim already has an attested record,
+  // rehydrate the snapshot and re-enable Evaluate. Bound to the claim refs,
+  // never to form fields (the record is immutable server-side).
+  useEffect(() => {
+    let cancelled = false
+    async function rehydrate() {
+      if (!deployed || !evalCoverageId || !evalClaimId) return
+      try {
+        const res = await fetch(`/api/evidence?coverageId=${encodeURIComponent(evalCoverageId)}&claimId=${encodeURIComponent(evalClaimId)}`)
+        const body = await res.json()
+        if (cancelled || !body.attested) return
+        setEvidenceSnapshot({
+          content: body.content as EvidenceContent,
+          hash: body.evidenceHash as `0x${string}`,
+          claimId: String(BigInt(evalClaimId)),
+          coverageId: String(BigInt(evalCoverageId)),
+        })
+        setEvidenceAttested(true)
+        setAction("evaluate", { status: "idle", message: "Evidence already attested server-side; evaluation is enabled." })
+      } catch {
+        // Offline / transient: leave the panel as-is; attest will surface errors.
+      }
+    }
+    void rehydrate()
+    return () => {
+      cancelled = true
+    }
+  }, [deployed, evalCoverageId, evalClaimId])
+
+  // REV-016 round 3: the evidence content is built ONCE when the claim is
+  // opened and the exact snapshot is kept in state, so the hash committed
+  // on-chain is byte-identical to the content attested later. productMatches
+  // is NOT a client field anymore: the server derives it.
   function currentEvidenceContent(): EvidenceContent {
     return {
       productNote: productNote.trim() || "resvyn-empty",
@@ -632,6 +664,15 @@ export default function AppConsole() {
       })
       const body = await res.json()
       if (!res.ok) {
+        // REV-016 round 4: a 409 evidence_conflict means a previous intake
+        // already succeeded (e.g. before a reload). Recover: treat the claim
+        // as attested and enable Evaluate instead of stranding the flow.
+        if (res.status === 409 && body.error === "evidence_conflict") {
+          setEvidenceAttested(true)
+          setAction("evaluate", { status: "confirmed", message: "Evidence was already attested server-side; evaluation is enabled." })
+          pushLog({ event: "Evidence already attested", detail: `hash ${body.evidenceHash?.slice(0, 12) ?? "unknown"}`, tone: "ok" })
+          return
+        }
         const msg2 =
           res.status === 429
             ? "Too many requests. Wait a minute, then try again."
