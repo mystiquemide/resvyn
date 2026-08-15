@@ -1,29 +1,32 @@
 /*
- * In-memory sliding-window rate limiter for /api/evaluate.
+ * In-memory sliding-window rate limiter for /api/evaluate and /api/evidence.
  *
- * The evaluator route signs decisions, so it is the one public endpoint that
- * must not be freely spammable. This is a single-instance limiter: it lives in
- * process memory, which is correct for the current one-server deployment.
- * A multi-instance deployment must move this to a shared store.
+ * The evaluator routes sign decisions, so they must not be freely spammable.
+ * This is a single-instance limiter: it lives in process memory, which is
+ * correct for the current one-server deployment. A multi-instance deployment
+ * must move this to a shared store.
  *
  * Identity (REV-005): client-supplied forwarding headers are only trusted when
  * the deployment actually sits behind a proxy that strips and rewrites them
- * (RESVYN_TRUST_PROXY=1). Without that explicit acknowledgement the limiter
- * falls back to a single shared bucket, so a caller rotating arbitrary
- * x-forwarded-for values gains no advantage over honest clients.
+ * (RESVYN_TRUST_PROXY=1). Without that explicit acknowledgement the per-client
+ * bucket is SKIPPED entirely: there is no shared "everyone" bucket that a
+ * single caller could exhaust, and abuse is bounded by the per-claim and
+ * global budgets instead. Rotating arbitrary x-forwarded-for values gains
+ * nothing.
  *
  * Budgets (REV-005): every request consumes a GLOBAL bucket and a per-claim
  * bucket, so one claim cannot be drained by many IPs and one caller cannot
- * burn the whole server budget. Memory is bounded: the map is swept on every
- * call and hard-capped, with eviction starting at the oldest activity.
+ * burn the whole server budget. Budgets are checked client -> claim -> global
+ * BEFORE anything is consumed, so an already-blocked request never burns the
+ * global allowance for other clients. Memory is bounded: the map is swept on
+ * every call and hard-capped, with eviction starting at the oldest activity.
  *
  * Config (server env, gitignored):
  *   RESVYN_RATE_LIMIT_MAX         max requests per window per client (default 10)
  *   RESVYN_RATE_LIMIT_WINDOW_MS   window length in ms (default 60000)
  *   RESVYN_RATE_LIMIT_GLOBAL_MAX  global max per window across all clients
  *                                 (default 200)
- *   RESVYN_RATE_LIMIT_CLAIM_MAX   max evaluate calls per claim per window
- *                                 (default 5)
+ *   RESVYN_RATE_LIMIT_CLAIM_MAX   max calls per claim per window (default 10)
  *   RESVYN_RATE_LIMIT_MAX_KEYS    hard cap on tracked keys (default 5000)
  *   RESVYN_TRUST_PROXY            set to "1" only behind a stripping proxy
  */
@@ -41,7 +44,7 @@ const state: LimiterState = {
   max: 10,
   windowMs: 60_000,
   globalMax: 200,
-  claimMax: 5,
+  claimMax: 10,
   maxKeys: 5_000,
   hits: new Map(),
 }
@@ -87,13 +90,16 @@ function evictOldest(now: number): void {
   }
 }
 
-function consume(key: string, now: number, budget: number): boolean {
+function liveCount(key: string, now: number): number {
+  const cutoff = now - state.windowMs
+  return (state.hits.get(key) ?? []).filter((t) => t > cutoff).length
+}
+
+function recordHit(key: string, now: number): void {
   const cutoff = now - state.windowMs
   const times = (state.hits.get(key) ?? []).filter((t) => t > cutoff)
-  if (times.length >= budget) return false
   times.push(now)
   state.hits.set(key, times)
-  return true
 }
 
 export interface RateLimitResult {
@@ -111,32 +117,29 @@ export function checkRateLimit(
   sweep(now)
   evictOldest(now)
 
-  // Global budget first: protects the whole server, independent of identity.
-  if (!consume("__global__", now, state.globalMax)) {
-    const times = state.hits.get("__global__") ?? []
-    const retryAfterMs = Math.max(0, (times[0] ?? now) + state.windowMs - now)
-    return { allowed: false, retryAfterMs, remaining: 0 }
+  // REV-005 round 2: NEVER consume a budget for a request that is already
+  // blocked. Client and claim buckets are checked first, global last, and
+  // hits are only recorded after every check passed.
+  const checkOrder: Array<[string, number]> = []
+  if (clientKey !== "shared") checkOrder.push([clientKey, state.max])
+  if (claimKey) checkOrder.push([claimKey, state.claimMax])
+  checkOrder.push(["__global__", state.globalMax])
+
+  for (const [key, budget] of checkOrder) {
+    if (liveCount(key, now) >= budget) {
+      const times = state.hits.get(key) ?? []
+      const retryAfterMs = Math.max(0, (times[0] ?? now) + state.windowMs - now)
+      return { allowed: false, retryAfterMs, remaining: 0 }
+    }
   }
 
-  // Per-claim budget: one claim cannot be drained by many identities.
-  if (claimKey && !consume(claimKey, now, state.claimMax)) {
-    const times = state.hits.get(claimKey) ?? []
-    const retryAfterMs = Math.max(0, (times[0] ?? now) + state.windowMs - now)
-    return { allowed: false, retryAfterMs, remaining: 0 }
-  }
-
-  // Per-client budget.
-  if (!consume(clientKey, now, state.max)) {
-    const times = state.hits.get(clientKey) ?? []
-    const retryAfterMs = Math.max(0, (times[0] ?? now) + state.windowMs - now)
-    return { allowed: false, retryAfterMs, remaining: 0 }
-  }
-
-  const remaining = state.max - (state.hits.get(clientKey)?.length ?? 0)
-  return { allowed: true, retryAfterMs: 0, remaining }
+  // All checks passed: record the hit in every bucket.
+  for (const [key] of checkOrder) recordHit(key, now)
+  const remaining = clientKey === "shared" ? state.globalMax : state.max - liveCount(clientKey, now)
+  return { allowed: true, retryAfterMs: 0, remaining: Math.max(0, remaining) }
 }
 
-/** Test-only: clear all tracked buckets. Never called by the route. */
+/** Test-only: clear all tracked buckets. Never called by a route. */
 export function resetRateLimiterForTests(): void {
   state.hits.clear()
 }
@@ -144,8 +147,9 @@ export function resetRateLimiterForTests(): void {
 /**
  * Client identity (REV-005). Forwarding headers are spoofable, so they are
  * used ONLY when the operator explicitly declared a trusted stripping proxy
- * (RESVYN_TRUST_PROXY=1). Otherwise every caller shares one bucket: spoofing
- * cannot bypass the cap, and honest clients get the same budget as attackers.
+ * (RESVYN_TRUST_PROXY=1). Otherwise the identity is "shared", which SKIPS the
+ * per-client bucket entirely: there is no shared allowance for one caller to
+ * exhaust, and abuse stays bounded by per-claim + global budgets.
  */
 export function clientKeyFromRequest(req: Request): string {
   if (process.env.RESVYN_TRUST_PROXY !== "1") return "shared"
@@ -159,7 +163,11 @@ export function clientKeyFromRequest(req: Request): string {
   return "shared"
 }
 
-/** Per-claim budget key so evaluate traffic is capped per claim (REV-005). */
+/**
+ * Per-claim budget key. The route passes the CANONICAL decimal ids (parsed
+ * with BigInt before rate limiting), so "1", "01", and "+1" all map to the
+ * same key (REV-005 round 2).
+ */
 export function claimKeyFromIds(coverageId: bigint | string, claimId: bigint | string): string {
   return `claim:${String(coverageId)}:${String(claimId)}`
 }

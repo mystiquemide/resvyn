@@ -335,3 +335,17 @@ export function isArchivedProofInstance(addr: string): boolean {
 export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): boolean {
   return !isArchivedProofInstance(addr) && process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL === "1"
 }
+
+/**
+ * REV-002 round 2: the client-side half of the exact deployment gate. When
+ * NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is set, the live contract's immutable
+ * evaluatorSigner must match it or the app renders read-only. The server
+ * enforces the authoritative check (on-chain signer vs RESVYN_EVALUATOR_KEY).
+ */
+export const EXPECTED_EVALUATOR = process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR?.toLowerCase()
+
+export function evaluatorSignerMatches(expected: string | undefined, live: string | undefined): boolean {
+  if (!expected) return true // operator did not pin an expected signer
+  if (!live) return false // cannot verify yet
+  return expected === live.toLowerCase()
+}

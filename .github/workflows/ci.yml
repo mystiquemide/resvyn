@@ -19,6 +19,8 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npx hardhat compile
       - run: npx hardhat test
+      - name: Evaluator parity (scripts vs web)
+        run: node --test --import tsx parity/evaluator.parity.test.ts
 
   web:
     name: Web (lint + type + test + build + audit)

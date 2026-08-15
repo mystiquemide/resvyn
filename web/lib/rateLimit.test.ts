@@ -73,6 +73,37 @@ describe("checkRateLimit", () => {
     expect(checkRateLimit("a-3").allowed).toBe(true)
     expect(checkRateLimit("a-4").allowed).toBe(false)
   })
+
+  // REV-005 round 2: an already-blocked client must NOT burn the global
+  // budget for other clients, and a blocked claim must not burn it either.
+  it("does not consume the global budget for requests blocked by client or claim limits", () => {
+    process.env.RESVYN_RATE_LIMIT_MAX = "2"
+    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "3"
+    // Client A exhausts its own bucket after 2 hits.
+    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(true) // global 1
+    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(true) // global 2
+    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(false) // client-blocked, global untouched
+    // Client B gets the remaining global allowance: exactly 1 more hit. If
+    // A's blocked request had consumed global, B would be blocked outright.
+    expect(checkRateLimit("blocked-b", "claim:9:9").allowed).toBe(true) // global 3
+    expect(checkRateLimit("blocked-b", "claim:9:9").allowed).toBe(false) // global-blocked
+    // Global is exhausted at 3 recorded hits (2 from A + 1 from B), not 4.
+    expect(checkRateLimit("fresh-c", "claim:8:8").allowed).toBe(false)
+  })
+
+  // REV-005 round 2: without a trusted proxy there is NO shared per-client
+  // bucket, so one caller cannot exhaust an "everyone" allowance. Abuse stays
+  // bounded by the per-claim and global budgets.
+  it("skips the per-client bucket for the untrusted shared identity", () => {
+    process.env.RESVYN_RATE_LIMIT_MAX = "2" // would block a normal client at 3
+    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "1000"
+    process.env.RESVYN_RATE_LIMIT_CLAIM_MAX = "100"
+    // 20 requests all using the shared identity with different claims all pass.
+    for (let i = 0; i < 20; i++) {
+      expect(checkRateLimit("shared", `claim:${i}:1`).allowed).toBe(true)
+    }
+    // No single caller can lock out everyone else by exhausting a shared key.
+  })
 })
 
 describe("clientKeyFromRequest (REV-005)", () => {
@@ -80,8 +111,8 @@ describe("clientKeyFromRequest (REV-005)", () => {
     const req = new Request("http://localhost/api/evaluate", {
       headers: { "x-forwarded-for": "1.2.3.4, 5.6.7.8" },
     })
-    // No RESVYN_TRUST_PROXY: spoofable headers are ignored, everyone shares
-    // the same bucket, so rotating header values buys nothing.
+    // No RESVYN_TRUST_PROXY: spoofable headers are ignored and the identity
+    // is "shared", which skips the per-client bucket entirely.
     expect(clientKeyFromRequest(req)).toBe("shared")
   })
 
@@ -101,15 +132,18 @@ describe("clientKeyFromRequest (REV-005)", () => {
     expect(clientKeyFromRequest(req)).toBe("9.9.9.9")
   })
 
-  it("falls back to the shared bucket without proxy headers", () => {
+  it("falls back to the shared identity without proxy headers", () => {
     process.env.RESVYN_TRUST_PROXY = "1"
     expect(clientKeyFromRequest(new Request("http://localhost/api/evaluate"))).toBe("shared")
   })
 })
 
-describe("claimKeyFromIds", () => {
-  it("builds a stable per-claim key", () => {
+describe("claimKeyFromIds (REV-005 round 2)", () => {
+  it("builds a canonical per-claim key from parsed ids", () => {
     expect(claimKeyFromIds(1n, 2n)).toBe("claim:1:2")
-    expect(claimKeyFromIds("1", "2")).toBe("claim:1:2")
+    // The route parses with BigInt before calling, so alternate spellings of
+    // the same id collapse to one key.
+    expect(claimKeyFromIds(BigInt("01"), BigInt("+1"))).toBe("claim:1:1")
+    expect(claimKeyFromIds(BigInt("0x1"), 1n)).toBe("claim:1:1")
   })
 })

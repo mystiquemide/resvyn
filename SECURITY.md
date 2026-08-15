@@ -24,20 +24,28 @@ before public disclosure unless coordinated otherwise.
   It is server-env only, never committed, never in the client bundle.
   Compromise of this key lets an attacker sign any decision for any open
   claim, up to each coverage's cap. It is held by the operator.
-- **Evidence authority (REV-001):** `/api/evaluate` accepts evidence only as
-  an EIP-191 attestation signed by the on-chain claim claimant or coverage
-  merchant, bound to the live claim/coverage/chain and the on-chain evidence
-  hash. An anonymous caller cannot obtain a signature; a caller cannot tamper
-  with attested fields or amounts without invalidating the signature; a
-  cross-claim attestation is refused.
+- **Evidence authority (REV-001):** `/api/evaluate` accepts no evidence
+  fields and no amount. Evidence is attested once at `POST /api/evidence` by
+  the on-chain claim claimant or coverage merchant; the server requires the
+  content's canonical hash to equal the claim's on-chain `evidenceHash`, so
+  the chain commitment verifiably commits to the server-seen content. The
+  record is stored server-side (first-write-wins, immutable) and evaluation
+  derives all signals and the payout from it. A missing record, a stale or
+  forged authorization, or a cross-claim reference returns no signature.
+- **Exact deployment gate (REV-002):** the route reads the contract's
+  immutable `evaluatorSigner` and requires it to equal the address derived
+  from `RESVYN_EVALUATOR_KEY`. The archived Mainnet proof instance is
+  read-only: the route refuses to sign for it, and the app renders write
+  controls only for a non-proof address with `NEXT_PUBLIC_RESVYN_OPERATIONAL=1`
+  and (when pinned) a matching `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR`.
 - **Fail-closed evaluation (REV-006):** when the optional Groq brain is
   configured and the provider fails (HTTP error, timeout, malformed output,
   schema failure), no signature is returned. An outage pauses the Groq path;
   it never silently approves.
-- **Deployment manifest (REV-002):** the archived Mainnet proof instance is
-  read-only. Writes are enabled only when `NEXT_PUBLIC_RESVYN_ADDRESS` points
-  at a non-proof contract AND `NEXT_PUBLIC_RESVYN_OPERATIONAL=1` is set, and
-  the evaluate route refuses to sign for the proof instance regardless.
+- **Rate limits (REV-005):** per-client only behind a declared trusted proxy
+  (`RESVYN_TRUST_PROXY=1`); per-claim budgets use canonical ids; a global
+  budget bounds total traffic; blocked requests never consume the global
+  allowance for other clients.
 - **Contract:** the evaluator signer is immutable (rotation = new
   deployment). Claims are terminal, nonces are single-use, and the winning
   invariant guards (insufficient free reserve, withdrawal above free reserve,

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   AlertTriangle,
   Cpu,
@@ -41,14 +41,17 @@ import {
   APP_CHAIN,
   APP_CONTRACT_ADDRESS,
   DEPLOY_START_BLOCK,
+  EXPECTED_EVALUATOR,
   PROOF,
+  evaluatorSignerMatches,
   explorerTx,
   isAppContractReady,
   isOperationalDeployment,
   warrantyReserveAbi,
 } from "@/lib/chain"
 import { formatBOT, parseBOT, shortAddr } from "@/lib/format"
-import { attestationMessage } from "@/lib/evaluateAuth"
+import { evidenceContentHash, type EvidenceContent } from "@/lib/evidenceContent"
+import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
 
 type Tone = "ok" | "idle" | "pending" | "warn" | "fail"
 type ActionKey = "deposit" | "issue" | "open" | "evaluate" | "resolve" | "withdraw" | "probe"
@@ -196,7 +199,6 @@ export default function AppConsole() {
   // deployment. The default archived proof instance is strictly read-only:
   // no deposit, issuance, claim, settlement, or withdrawal against it.
   const operational = isOperationalDeployment(APP_CONTRACT_ADDRESS)
-  const canWrite = Boolean(operational && isConnected && onAppChain && deployed && contract && address)
 
   const [reserve, setReserve] = useState({ balance: 0n, locked: 0n, free: 0n })
   const [evaluator, setEvaluator] = useState<Address | null>(null)
@@ -236,8 +238,14 @@ export default function AppConsole() {
   const [signed, setSigned] = useState<SignedDecision | null>(null)
   const [noWallet, setNoWallet] = useState(false)
   const [instance, setInstance] = useState({ balance: 0n, locked: 0n, free: 0n, nonceUsed: false })
-  // REV-009: last observed counts, used to skip unchanged per-record re-reads.
-  const lastCounts = useRef({ cov: -1n, claim: -1n })
+  // REV-009 round 2: rows are always re-read on refresh (no stale caching);
+  // only the historical log scan is bounded by the deployment start block.
+  const [evidenceAttested, setEvidenceAttested] = useState(false)
+
+  // REV-002 round 2: when the operator pinned an expected evaluator signer,
+  // the live on-chain signer must match it or the app renders read-only.
+  const signerOk = evaluatorSignerMatches(EXPECTED_EVALUATOR, evaluator ?? undefined)
+  const canWrite = Boolean(operational && signerOk && isConnected && onAppChain && deployed && contract && address)
 
   useEffect(() => {
     if (address && !claimant) {
@@ -279,80 +287,77 @@ export default function AppConsole() {
         nonceUsed: Boolean(nonceUsed),
       })
 
-      // REV-009: skip the per-record re-reads and the historical log scan when
-      // the coverage/claim counts have not changed since the last refresh.
-      // This keeps refresh cost bounded by what changed, not by total history.
-      const countsUnchanged =
-        lastCounts.current.cov === covCount && lastCounts.current.claim === claimCount
-      if (!countsUnchanged) {
-        lastCounts.current = { cov: covCount, claim: claimCount }
+      // REV-009 round 2: rows are ALWAYS re-read on refresh. Claim status and
+      // paidAmount change on settlement without claimCount changing, and
+      // coverage status changes on expiry without coverageCount changing, so
+      // a counts-based cache would show stale state. Reads stay bounded: at
+      // most 12 coverage rows + 12 claim rows, and the log scan below is
+      // limited to the deployment start block.
+      const lastCov = Number(covCount > 12n ? 12n : covCount)
+      const covRows: CoverageRow[] = []
+      for (let i = 0; i < lastCov; i++) {
+        const id = covCount - BigInt(i)
+        const [cov, boundClaim] = await Promise.all([
+          publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "coverageOf", args: [id] }),
+          publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "claimIdOfCoverage", args: [id] }),
+        ])
+        covRows.push({
+          id,
+          merchant: cov.merchant,
+          claimant: cov.claimant,
+          maxPayout: cov.maxPayout,
+          expiry: cov.expiry,
+          status: Number(cov.status),
+          claimId: boundClaim,
+        })
+      }
+      setCoverages(covRows)
 
-        const lastCov = Number(covCount > 12n ? 12n : covCount)
-        const covRows: CoverageRow[] = []
-        for (let i = 0; i < lastCov; i++) {
-          const id = covCount - BigInt(i)
-          const [cov, boundClaim] = await Promise.all([
-            publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "coverageOf", args: [id] }),
-            publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "claimIdOfCoverage", args: [id] }),
-          ])
-          covRows.push({
-            id,
-            merchant: cov.merchant,
-            claimant: cov.claimant,
-            maxPayout: cov.maxPayout,
-            expiry: cov.expiry,
-            status: Number(cov.status),
-            claimId: boundClaim,
+      const lastClaim = Number(claimCount > 12n ? 12n : claimCount)
+      const claimRows: ClaimRow[] = []
+      for (let i = 0; i < lastClaim; i++) {
+        const id = claimCount - BigInt(i)
+        const claim = await publicClient.readContract({
+          address: contract,
+          abi: warrantyReserveAbi,
+          functionName: "claimOf",
+          args: [id],
+        })
+        claimRows.push({
+          id,
+          coverageId: claim.coverageId,
+          claimant: claim.claimant,
+          evidenceHash: claim.evidenceHash,
+          paidAmount: claim.paidAmount,
+          status: Number(claim.status),
+        })
+      }
+      setClaims(claimRows)
+
+      // REV-009: bound the historical log scan to this deployment's start
+      // block instead of rescanning the whole chain from block 0. Only the
+      // most recent events are needed for the session log.
+      try {
+        const raw = await publicClient.getLogs({ address: contract, fromBlock: DEPLOY_START_BLOCK, toBlock: "latest" })
+        const decoded = parseEventLogs({ abi: warrantyReserveAbi, logs: raw })
+        const fromChain: LogEntry[] = decoded
+          .slice(-20)
+          .reverse()
+          .map((ev, idx) => ({
+            id: `chain-${ev.transactionHash}-${idx}`,
+            event: ev.eventName,
+            detail: summarizeEvent(ev.eventName, ev.args as Record<string, unknown>),
+            tone: ev.eventName.startsWith("Claim") && ev.eventName.endsWith("Rejected") ? "fail" : "ok",
+            hash: ev.transactionHash,
+          }))
+        if (fromChain.length) {
+          setLog((prev) => {
+            const seen = new Set(fromChain.map((e) => e.id))
+            return [...fromChain, ...prev.filter((e) => !seen.has(e.id))].slice(0, 40)
           })
         }
-        setCoverages(covRows)
-
-        const lastClaim = Number(claimCount > 12n ? 12n : claimCount)
-        const claimRows: ClaimRow[] = []
-        for (let i = 0; i < lastClaim; i++) {
-          const id = claimCount - BigInt(i)
-          const claim = await publicClient.readContract({
-            address: contract,
-            abi: warrantyReserveAbi,
-            functionName: "claimOf",
-            args: [id],
-          })
-          claimRows.push({
-            id,
-            coverageId: claim.coverageId,
-            claimant: claim.claimant,
-            evidenceHash: claim.evidenceHash,
-            paidAmount: claim.paidAmount,
-            status: Number(claim.status),
-          })
-        }
-        setClaims(claimRows)
-
-        // REV-009: bound the historical log scan to this deployment's start
-        // block instead of rescanning the whole chain from block 0. Only the
-        // most recent events are needed for the session log.
-        try {
-          const raw = await publicClient.getLogs({ address: contract, fromBlock: DEPLOY_START_BLOCK, toBlock: "latest" })
-          const decoded = parseEventLogs({ abi: warrantyReserveAbi, logs: raw })
-          const fromChain: LogEntry[] = decoded
-            .slice(-20)
-            .reverse()
-            .map((ev, idx) => ({
-              id: `chain-${ev.transactionHash}-${idx}`,
-              event: ev.eventName,
-              detail: summarizeEvent(ev.eventName, ev.args as Record<string, unknown>),
-              tone: ev.eventName.startsWith("Claim") && ev.eventName.endsWith("Rejected") ? "fail" : "ok",
-              hash: ev.transactionHash,
-            }))
-          if (fromChain.length) {
-            setLog((prev) => {
-              const seen = new Set(fromChain.map((e) => e.id))
-              return [...fromChain, ...prev.filter((e) => !seen.has(e.id))].slice(0, 40)
-            })
-          }
-        } catch {
-          /* historical logs are optional; session log still works */
-        }
+      } catch {
+        /* historical logs are optional; session log still works */
       }
     } catch (err) {
       setReadError(describeError(err))
@@ -502,6 +507,24 @@ export default function AppConsole() {
     )
   }
 
+  // The full evidence content the claim commits to on-chain. The claim is
+  // opened with evidenceContentHash(content), and the same content is later
+  // attested at POST /api/evidence, where the server recomputes the hash and
+  // requires it to equal the on-chain hash (REV-001 round 2).
+  function currentEvidenceContent(): EvidenceContent {
+    return {
+      productNote: productNote.trim() || "resvyn-empty",
+      receiptNote: receiptNote.trim() || "resvyn-empty",
+      damageDescription: evidenceNote.trim(),
+      productMatches: signals.productMatches,
+      damageEligible: signals.damageEligible,
+      evidenceComplete: signals.evidenceComplete,
+      fileIntegrityOk: signals.fileIntegrityOk,
+      requestedAmountWei: requestedAmt.trim() === "" ? "0" : parseBOT(requestedAmt).toString(),
+      issuedAt: Math.floor(Date.now() / 1000) - 3600,
+    }
+  }
+
   async function onOpen() {
     if (!contract) return
     let coverageId: bigint
@@ -515,72 +538,54 @@ export default function AppConsole() {
       setAction("open", { status: "failed", message: "Coverage id must be a whole number, like 1 or 2." })
       return
     }
+    // The claim is opened with the canonical evidence content hash so the
+    // on-chain commitment can later be verified by the server at intake.
+    const content = currentEvidenceContent()
+    const evidenceHash = evidenceContentHash(content)
     await send("open", "Open claim", () =>
       writeContract({
         address: contract,
         abi: warrantyReserveAbi,
         functionName: "openClaim",
-        args: [coverageId, hashText(evidenceNote)],
+        args: [coverageId, evidenceHash],
       }),
     )
   }
 
-  async function onEvaluate() {
+  // REV-001 round 2 step 1: attest the evidence content to the server. The
+  // claimant/merchant signs the intake message; the server verifies the
+  // content hashes to the on-chain claim.evidenceHash and stores it
+  // server-side (first write wins).
+  async function onAttestEvidence() {
     if (!walletClient || !address) {
-      setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to attest evidence and evaluate." })
+      setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to attest evidence." })
       return
     }
     setAction("evaluate", { status: "pending", message: "Waiting for your evidence signature…" })
-    setSigned(null)
     try {
-      let requested: bigint
-      try {
-        requested = parseBOT(requestedAmt)
-      } catch (err) {
-        setAction("evaluate", { status: "failed", message: err instanceof Error ? err.message : "Enter a valid amount in BOT." })
-        return
-      }
-      if (requested === 0n) {
-        setAction("evaluate", { status: "failed", message: "Requested amount must be greater than zero." })
-        return
-      }
-      // REV-001: the evidence hash the claim was opened with. The contract
-      // binds the claim to this hash, so the signed attestation must name the
-      // exact same hash or the server refuses.
-      const evidenceHash = hashText(evidenceNote)
+      const coverageId = String(BigInt(evalCoverageId))
+      const claimId = String(BigInt(evalClaimId))
+      const content = currentEvidenceContent()
+      const evidenceHash = evidenceContentHash(content)
       const timestamp = Math.floor(Date.now() / 1000)
-      const att = {
+      const msg = intakeMessage({
         chainId: APP_CHAIN.id,
         verifier: contract as Address,
-        coverageId: evalCoverageId,
-        claimId: evalClaimId,
+        coverageId,
+        claimId,
         evidenceHash,
-        productMatches: signals.productMatches,
-        damageEligible: signals.damageEligible,
-        evidenceComplete: signals.evidenceComplete,
-        fileIntegrityOk: signals.fileIntegrityOk,
-        requestedAmountWei: requested.toString(),
-        issuedAt: timestamp - 3600,
+        content,
         timestamp,
-      }
-      // The claimant or merchant attests the evidence under their own key; the
-      // server recovers the signer and checks it against on-chain state.
-      const signature = await walletClient.signMessage({ message: attestationMessage(att) })
-      setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
-      const res = await fetch("/api/evaluate", {
+      })
+      const signature = await walletClient.signMessage({ message: msg })
+      setAction("evaluate", { status: "pending", message: "Submitting evidence to the server…" })
+      const res = await fetch("/api/evidence", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          coverageId: evalCoverageId,
-          claimId: evalClaimId,
-          evidence: {
-            productMatches: signals.productMatches,
-            damageEligible: signals.damageEligible,
-            evidenceComplete: signals.evidenceComplete,
-            fileIntegrityOk: signals.fileIntegrityOk,
-            requestedAmountWei: requested.toString(),
-            issuedAt: att.issuedAt,
-          },
+          coverageId,
+          claimId,
+          evidence: content,
           signer: address,
           signature,
           timestamp,
@@ -588,12 +593,64 @@ export default function AppConsole() {
       })
       const body = await res.json()
       if (!res.ok) {
-        const msg =
+        const msg2 =
+          res.status === 429
+            ? "Too many requests. Wait a minute, then try again."
+            : body.message || body.error || "Evidence refused"
+        setAction("evaluate", { status: "failed", message: msg2 })
+        pushLog({ event: "Evidence refused", detail: msg2, tone: "warn" })
+        return
+      }
+      setEvidenceAttested(true)
+      setAction("evaluate", { status: "confirmed", message: "Evidence attested server-side" })
+      pushLog({ event: "Evidence attested", detail: `hash ${body.evidenceHash.slice(0, 12)}…`, tone: "ok" })
+    } catch (err) {
+      setAction("evaluate", { status: "failed", message: describeError(err) })
+    }
+  }
+
+  // REV-001 round 2 step 2: request evaluation. The body carries ONLY the
+  // claim references and an authorization signature - no evidence fields, no
+  // amount. The server derives everything from its stored evidence record.
+  async function onEvaluate() {
+    if (!walletClient || !address) {
+      setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to evaluate." })
+      return
+    }
+    setAction("evaluate", { status: "pending", message: "Waiting for your authorization signature…" })
+    setSigned(null)
+    try {
+      const coverageId = String(BigInt(evalCoverageId))
+      const claimId = String(BigInt(evalClaimId))
+      const timestamp = Math.floor(Date.now() / 1000)
+      const msg = evaluateMessage({
+        chainId: APP_CHAIN.id,
+        verifier: contract as Address,
+        coverageId,
+        claimId,
+        timestamp,
+      })
+      const signature = await walletClient.signMessage({ message: msg })
+      setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
+      const res = await fetch("/api/evaluate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          coverageId,
+          claimId,
+          signer: address,
+          signature,
+          timestamp,
+        }),
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        const msg2 =
           res.status === 429
             ? "Too many evaluate requests. Wait a minute, then try again."
             : body.message || body.error || "Evaluator refused"
-        setAction("evaluate", { status: "failed", message: msg })
-        pushLog({ event: "Evaluator refused", detail: msg, tone: "warn" })
+        setAction("evaluate", { status: "failed", message: msg2 })
+        pushLog({ event: "Evaluator refused", detail: msg2, tone: "warn" })
         return
       }
       const d = body.decision
@@ -725,6 +782,16 @@ export default function AppConsole() {
         title: "This is the archived proof instance (read-only)",
         body:
           "The configured contract is the recorded Mainnet proof deployment, whose evaluator signer is no longer in use. Deposit, issuance, claim, settlement, and withdrawal are disabled so no real BOT can be locked without a working settlement path. Verify the proof on /proof. Point NEXT_PUBLIC_RESVYN_ADDRESS at a verified operational deployment and set NEXT_PUBLIC_RESVYN_OPERATIONAL=1 to enable writes.",
+      }
+    }
+    // REV-002 round 2: the pinned expected evaluator signer must match the
+    // live on-chain signer, or the deployment cannot settle anything.
+    if (deployed && EXPECTED_EVALUATOR && !signerOk) {
+      return {
+        tone: "warn" as Tone,
+        title: "Evaluator signer mismatch (read-only)",
+        body:
+          "This deployment's on-chain evaluator signer does not match NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR, so no decision signed here could ever settle. All writes are disabled until the deployment manifest is corrected.",
       }
     }
     if (!deployed) {
@@ -981,9 +1048,13 @@ export default function AppConsole() {
                 ))}
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
-                <button className="btn btn-primary" onClick={() => void onEvaluate()} disabled={!canWrite || busy} style={{ padding: "0.6rem 1rem" }}>
+                <button className="btn btn-primary" onClick={() => void onAttestEvidence()} disabled={!canWrite || busy} style={{ padding: "0.6rem 1rem" }}>
                   {txs.evaluate.status === "pending" ? <Loader2 size={15} /> : null}
-                  Evaluate (sign evidence)
+                  {evidenceAttested ? "Re-attest evidence" : "Attest evidence to server"}
+                </button>
+                <button className="btn btn-ghost" onClick={() => void onEvaluate()} disabled={!canWrite || busy || !evidenceAttested} style={{ padding: "0.6rem 1rem" }}>
+                  {txs.evaluate.status === "pending" ? <Loader2 size={15} /> : null}
+                  Evaluate
                 </button>
                 <button className="btn btn-ghost" onClick={() => void onResolve()} disabled={!canWrite || busy || !signed} style={{ padding: "0.6rem 1rem" }}>
                   {txs.resolve.status === "pending" ? <Loader2 size={15} /> : null}

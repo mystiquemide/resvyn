@@ -1,13 +1,21 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest"
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest"
 import { privateKeyToAccount } from "viem/accounts"
 import { keccak256, stringToHex } from "viem"
+import { evidenceContentHash } from "@/lib/evidenceContent"
+import { resetEvidenceStoreForTests } from "@/lib/evidenceStore"
+import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
 
-// Route integration tests for POST /api/evaluate (REV-001, REV-011).
+// Route integration tests for POST /api/evidence and POST /api/evaluate
+// (REV-001 round 2, REV-002 round 2, REV-011).
 //
-// The route reads LIVE chain state, so the viem public client is mocked to a
-// deterministic fixture (one open claim #1 on coverage #1 with a known
-// evidence hash). Everything else - schema parsing, EIP-191 attestation
-// recovery, evaluator policy, EIP-712 signing - runs for real.
+// Trust boundary under test:
+//  - Evidence is attested ONCE via /api/evidence; the content must hash to
+//    the claim's on-chain evidence hash, and the signer must be the on-chain
+//    claimant or coverage merchant. The record is stored server-side.
+//  - /api/evaluate carries NO evidence fields; it loads the server-owned
+//    record bound to claim.evidenceHash and fails closed when missing.
+//  - The route reads the contract's evaluatorSigner and requires it to match
+//    the configured server key (exact deployment gate).
 
 const CLAIMANT_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 const MERCHANT_KEY = "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
@@ -15,11 +23,34 @@ const EVALUATOR_KEY = "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c
 const UNRELATED_KEY = "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
 
 const TEST_CONTRACT = "0x1111111111111111111111111111111111111111" as `0x${string}`
-const EVIDENCE_HASH = keccak256(stringToHex("damage-photos-and-receipt"))
 
 const claimant = privateKeyToAccount(CLAIMANT_KEY)
 const merchant = privateKeyToAccount(MERCHANT_KEY)
 const evaluator = privateKeyToAccount(EVALUATOR_KEY)
+
+// The evidence content the claim was "opened" with on-chain: its canonical
+// hash is the claim's evidenceHash, exactly like the AppConsole flow.
+// issuedAt is recent (module load) so the policy's staleness window passes.
+const ISSUED_AT = Math.floor(Date.now() / 1000) - 3600
+const evidenceContent = {
+  productNote: "Alpine kettle, batch A12",
+  receiptNote: "Store ticket 1842",
+  damageDescription: "Cracked base after normal use",
+  productMatches: true,
+  damageEligible: true,
+  evidenceComplete: true,
+  fileIntegrityOk: true,
+  requestedAmountWei: "500000000000000",
+  issuedAt: ISSUED_AT,
+}
+const EVIDENCE_HASH = evidenceContentHash(evidenceContent)
+
+// The evidence hash the mocked contract reports for claim #1. Tests that
+// attest a different content variant point this at the variant's hash.
+let fixtureEvidenceHash: `0x${string}` = EVIDENCE_HASH
+function setFixtureEvidenceHash(h: `0x${string}`) {
+  fixtureEvidenceHash = h
+}
 
 // --- Mocks ----------------------------------------------------------------
 
@@ -47,13 +78,16 @@ const fakeClient = {
         return {
           coverageId: 1n,
           claimant: claimant.address,
-          evidenceHash: EVIDENCE_HASH,
+          evidenceHash: fixtureEvidenceHash,
           paidAmount: 0n,
           status: 1, // Open
           openedAt: 1755000000n,
         }
       case "isNonceUsed":
         return false
+      case "evaluatorSigner":
+        // Matches RESVYN_EVALUATOR_KEY: the exact deployment gate passes.
+        return evaluator.address
       default:
         throw new Error(`unexpected read: ${functionName}`)
     }
@@ -70,48 +104,16 @@ vi.mock("viem", async (importOriginal) => {
 
 // --- Helpers --------------------------------------------------------------
 
-function attestationBody(overrides: Record<string, unknown> = {}) {
-  const timestamp = Math.floor(Date.now() / 1000)
-  return {
-    coverageId: "1",
-    claimId: "1",
-    evidence: {
-      productMatches: true,
-      damageEligible: true,
-      evidenceComplete: true,
-      fileIntegrityOk: true,
-      requestedAmountWei: "500000000000000",
-      issuedAt: timestamp - 3600,
-    },
-    timestamp,
-    ...overrides,
-  }
+async function postIntake(body: unknown): Promise<Response> {
+  const { POST } = await import("../evidence/route")
+  return POST(new Request("http://localhost/api/evidence", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }))
 }
 
-async function signedBody(signer: ReturnType<typeof privateKeyToAccount>, overrides: Record<string, unknown> = {}) {
-  const base = attestationBody(overrides)
-  const message = [
-    "resvyn:evaluate",
-    "677",
-    TEST_CONTRACT,
-    base.coverageId,
-    base.claimId,
-    EVIDENCE_HASH,
-    base.evidence.productMatches ? "1" : "0",
-    base.evidence.damageEligible ? "1" : "0",
-    base.evidence.evidenceComplete ? "1" : "0",
-    base.evidence.fileIntegrityOk ? "1" : "0",
-    base.evidence.requestedAmountWei,
-    String(base.evidence.issuedAt),
-    String(base.timestamp),
-  ].join(":")
-  const signature = await signer.signMessage({ message })
-  return { ...base, signer: signer.address, signature }
-}
-
-async function post(body: unknown): Promise<Response> {
-  // Invoke the route handler directly with a synthetic Request instead of
-  // hitting a network socket.
+async function postEvaluate(body: unknown): Promise<Response> {
   const { POST } = await import("./route")
   return POST(new Request("http://localhost/api/evaluate", {
     method: "POST",
@@ -120,14 +122,229 @@ async function post(body: unknown): Promise<Response> {
   }))
 }
 
+async function intakeBody(
+  signer: ReturnType<typeof privateKeyToAccount>,
+  overrides: { content?: Partial<typeof evidenceContent>; evidenceHash?: string; timestamp?: number } = {},
+) {
+  const timestamp = overrides.timestamp ?? Math.floor(Date.now() / 1000)
+  const content = { ...evidenceContent, ...(overrides.content ?? {}) }
+  const evidenceHash = (overrides.evidenceHash ?? fixtureEvidenceHash) as `0x${string}`
+  const msg = intakeMessage({
+    chainId: 677,
+    verifier: TEST_CONTRACT,
+    coverageId: "1",
+    claimId: "1",
+    evidenceHash: evidenceHash as `0x${string}`,
+    content,
+    timestamp,
+  })
+  const signature = await signer.signMessage({ message: msg })
+  return {
+    coverageId: "1",
+    claimId: "1",
+    evidence: content,
+    signer: signer.address,
+    signature,
+    timestamp,
+  }
+}
+
+async function evaluateBody(
+  signer: ReturnType<typeof privateKeyToAccount>,
+  overrides: { timestamp?: number } = {},
+) {
+  const timestamp = overrides.timestamp ?? Math.floor(Date.now() / 1000)
+  const msg = evaluateMessage({
+    chainId: 677,
+    verifier: TEST_CONTRACT,
+    coverageId: "1",
+    claimId: "1",
+    timestamp,
+  })
+  const signature = await signer.signMessage({ message: msg })
+  return {
+    coverageId: "1",
+    claimId: "1",
+    signer: signer.address,
+    signature,
+    timestamp,
+  }
+}
+
 // --- Tests ----------------------------------------------------------------
 
-describe("POST /api/evaluate trust boundary (REV-001)", () => {
+describe("POST /api/evidence (REV-001 round 2)", () => {
+  beforeAll(() => {
+    delete process.env.RESVYN_GROQ_KEY
+    process.env.RESVYN_RATE_LIMIT_MAX = "1000"
+    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "10000"
+    process.env.RESVYN_RATE_LIMIT_CLAIM_MAX = "10000"
+  })
+
+  beforeEach(() => {
+    resetEvidenceStoreForTests()
+    fixtureEvidenceHash = EVIDENCE_HASH
+  })
+
+  afterAll(() => {
+    delete process.env.RESVYN_GROQ_KEY
+    delete process.env.RESVYN_RATE_LIMIT_MAX
+    delete process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX
+    delete process.env.RESVYN_RATE_LIMIT_CLAIM_MAX
+    resetEvidenceStoreForTests()
+  })
+
+  it("refuses evidence whose content does not commit to the on-chain hash", async () => {
+    const body = await intakeBody(claimant, {
+      content: { ...evidenceContent, productMatches: false },
+    })
+    const res = await postIntake(body)
+    expect(res.status).toBe(403)
+    expect((await res.json()).error).toBe("attestation_invalid")
+  })
+
+  it("refuses evidence signed by a key that owns neither claim nor coverage", async () => {
+    const unrelated = privateKeyToAccount(UNRELATED_KEY)
+    const res = await postIntake(await intakeBody(unrelated))
+    expect(res.status).toBe(403)
+    expect((await res.json()).error).toBe("attestation_invalid")
+  })
+
+  it("refuses stale evidence attestations", async () => {
+    const body = await intakeBody(claimant, {
+      timestamp: Math.floor(Date.now() / 1000) - 3600,
+    })
+    const res = await postIntake(body)
+    expect(res.status).toBe(403)
+    expect((await res.json()).message).toMatch(/stale/)
+  })
+
+  it("stores claimant-attested evidence that commits to the on-chain hash", async () => {
+    const res = await postIntake(await intakeBody(claimant))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.evidenceHash.toLowerCase()).toBe(EVIDENCE_HASH.toLowerCase())
+  })
+
+  it("stores merchant-attested evidence (coverage owner) and rejects re-submission", async () => {
+    // Seed a claimant record for this claim first (first write wins).
+    const first = await postIntake(await intakeBody(claimant))
+    expect(first.status).toBe(200)
+    // The merchant's submission for the SAME claim must be refused: no
+    // contradictory records, no settlement race.
+    const res = await postIntake(await intakeBody(merchant))
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toBe("evidence_conflict")
+  })
+})
+
+describe("POST /api/evaluate (REV-001 round 2)", () => {
   beforeAll(() => {
     process.env.RESVYN_EVALUATOR_KEY = EVALUATOR_KEY
     delete process.env.RESVYN_GROQ_KEY
-    // The route rate-limits per shared bucket (no trusted proxy in tests);
-    // raise the budgets so the test suite exercises auth, not throttling.
+    process.env.RESVYN_RATE_LIMIT_MAX = "1000"
+    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "10000"
+    process.env.RESVYN_RATE_LIMIT_CLAIM_MAX = "10000"
+  })
+
+  beforeEach(() => {
+    resetEvidenceStoreForTests()
+    fixtureEvidenceHash = EVIDENCE_HASH
+  })
+
+  afterAll(() => {
+    delete process.env.RESVYN_EVALUATOR_KEY
+    delete process.env.RESVYN_GROQ_KEY
+    delete process.env.RESVYN_RATE_LIMIT_MAX
+    delete process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX
+    delete process.env.RESVYN_RATE_LIMIT_CLAIM_MAX
+    resetEvidenceStoreForTests()
+  })
+
+  it("fails closed when no server-owned evidence record exists for the claim", async () => {
+    resetEvidenceStoreForTests()
+    const res = await postEvaluate(await evaluateBody(claimant))
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body.error).toBe("evidence_not_attested")
+    expect(body.signature).toBeUndefined()
+  })
+
+  it("refuses an authorization signed by a key that owns neither claim nor coverage", async () => {
+    resetEvidenceStoreForTests()
+    await postIntake(await intakeBody(claimant)) // seed the record
+    const unrelated = privateKeyToAccount(UNRELATED_KEY)
+    const res = await postEvaluate(await evaluateBody(unrelated))
+    expect(res.status).toBe(403)
+    expect((await res.json()).error).toBe("authorization_invalid")
+  })
+
+  it("refuses a stale evaluation authorization", async () => {
+    resetEvidenceStoreForTests()
+    await postIntake(await intakeBody(claimant)) // seed the record
+    const res = await postEvaluate(
+      await evaluateBody(claimant, { timestamp: Math.floor(Date.now() / 1000) - 3600 }),
+    )
+    expect(res.status).toBe(403)
+    expect((await res.json()).message).toMatch(/stale/)
+  })
+
+  it("signs a decision for a claimant-authorized evaluation of attested evidence", async () => {
+    resetEvidenceStoreForTests()
+    await postIntake(await intakeBody(claimant)) // seed the record
+    const res = await postEvaluate(await evaluateBody(claimant))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.signature).toMatch(/^0x[0-9a-fA-F]{130}$/)
+    expect(body.signer.toLowerCase()).toBe(evaluator.address.toLowerCase())
+    expect(body.decision.claimId).toBe("1")
+    expect(body.decision.coverageId).toBe("1")
+    expect(body.decision.claimant.toLowerCase()).toBe(claimant.address.toLowerCase())
+    expect(body.decision.evidenceHash.toLowerCase()).toBe(EVIDENCE_HASH.toLowerCase())
+    expect(body.decision.amount).toBe("500000000000000")
+    expect(body.model.decision).toBe("APPROVE")
+  })
+
+  it("returns a REJECT decision for attested evidence that fails the policy", async () => {
+    resetEvidenceStoreForTests()
+    // The claim was opened with the hash of the damageEligible=false variant:
+    // point the fixture at that variant's hash, then attest it.
+    const rejectedContent = { ...evidenceContent, damageEligible: false }
+    setFixtureEvidenceHash(evidenceContentHash(rejectedContent))
+    const intake = await postIntake(await intakeBody(claimant, { content: rejectedContent }))
+    expect(intake.status).toBe(200)
+    const res = await postEvaluate(await evaluateBody(claimant))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.model.decision).toBe("REJECT")
+    expect(body.decision.result).toBe(2)
+    expect(body.decision.amount).toBe("0")
+  })
+
+  it("fails closed with no signature when Groq is configured but the provider fails (REV-006)", async () => {
+    resetEvidenceStoreForTests()
+    await postIntake(await intakeBody(claimant)) // seed the record
+    process.env.RESVYN_GROQ_KEY = "gsk_bogus"
+    const orig = globalThis.fetch
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: "down" } }), { status: 500 })) as typeof fetch
+    try {
+      const res = await postEvaluate(await evaluateBody(claimant))
+      expect(res.status).toBe(500)
+      const body = await res.json()
+      expect(body.error).toBe("sign_failed")
+      expect(body.signature).toBeUndefined()
+    } finally {
+      globalThis.fetch = orig
+      delete process.env.RESVYN_GROQ_KEY
+    }
+  })
+})
+
+describe("POST /api/evaluate deployment gate (REV-002 round 2)", () => {
+  beforeAll(() => {
+    process.env.RESVYN_EVALUATOR_KEY = EVALUATOR_KEY
+    delete process.env.RESVYN_GROQ_KEY
     process.env.RESVYN_RATE_LIMIT_MAX = "1000"
     process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "10000"
     process.env.RESVYN_RATE_LIMIT_CLAIM_MAX = "10000"
@@ -139,180 +356,59 @@ describe("POST /api/evaluate trust boundary (REV-001)", () => {
     delete process.env.RESVYN_RATE_LIMIT_MAX
     delete process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX
     delete process.env.RESVYN_RATE_LIMIT_CLAIM_MAX
+    resetEvidenceStoreForTests()
   })
 
-  it("returns 400 for a request without an attestation signature", async () => {
-    const res = await post(attestationBody())
-    expect(res.status).toBe(400)
-    const body = await res.json()
-    expect(body.error).toBe("bad_request")
-  })
-
-  it("refuses an attestation signed by a key that owns neither claim nor coverage", async () => {
-    const unrelated = privateKeyToAccount(UNRELATED_KEY)
-    const res = await post(await signedBody(unrelated))
-    expect(res.status).toBe(403)
-    const body = await res.json()
-    expect(body.error).toBe("attestation_invalid")
-    expect(body.message).toMatch(/neither the claim claimant nor the coverage merchant/)
-  })
-
-  it("refuses when the signed evidence fields differ from the request body", async () => {
-    // Signed with productMatches=true, sent with productMatches=false: the
-    // recovered signer no longer matches the message the server rebuilds, so
-    // the signature check must fail even though the key is the claimant's.
-    const base = attestationBody()
-    const message = [
-      "resvyn:evaluate",
-      "677",
-      TEST_CONTRACT,
-      base.coverageId,
-      base.claimId,
-      EVIDENCE_HASH,
-      "1", // signed as true
-      base.evidence.damageEligible ? "1" : "0",
-      base.evidence.evidenceComplete ? "1" : "0",
-      base.evidence.fileIntegrityOk ? "1" : "0",
-      base.evidence.requestedAmountWei,
-      String(base.evidence.issuedAt),
-      String(base.timestamp),
-    ].join(":")
-    const signature = await claimant.signMessage({ message })
-    const res = await post({
-      ...base,
-      signer: claimant.address,
-      signature,
-      evidence: { ...base.evidence, productMatches: false },
+  it("refuses to sign when the on-chain evaluator signer does not match the server key", async () => {
+    resetEvidenceStoreForTests()
+    await postIntake(await intakeBody(claimant)) // seed the record
+    // The contract's immutable evaluatorSigner points elsewhere.
+    fakeClient.readContract.mockImplementation(async ({ functionName }: { functionName: string }) => {
+      if (functionName === "evaluatorSigner") {
+        return "0x2222222222222222222222222222222222222222"
+      }
+      // Default fixture behavior for every other read.
+      switch (functionName) {
+        case "coverageOf":
+          return { merchant: merchant.address, claimant: claimant.address, maxPayout: 1000000000000000n, expiry: 2000000000n, status: 1 }
+        case "claimOf":
+          return { coverageId: 1n, claimant: claimant.address, evidenceHash: EVIDENCE_HASH, paidAmount: 0n, status: 1, openedAt: 1755000000n }
+        case "isNonceUsed":
+          return false
+        default:
+          throw new Error(`unexpected read: ${functionName}`)
+      }
     })
-    expect(res.status).toBe(403)
-    expect((await res.json()).error).toBe("attestation_invalid")
-  })
-
-  it("refuses an attestation whose evidence hash does not match the on-chain claim", async () => {
-    const otherHash = keccak256(stringToHex("different-evidence"))
-    const base = attestationBody()
-    const message = [
-      "resvyn:evaluate",
-      "677",
-      TEST_CONTRACT,
-      base.coverageId,
-      base.claimId,
-      otherHash,
-      base.evidence.productMatches ? "1" : "0",
-      base.evidence.damageEligible ? "1" : "0",
-      base.evidence.evidenceComplete ? "1" : "0",
-      base.evidence.fileIntegrityOk ? "1" : "0",
-      base.evidence.requestedAmountWei,
-      String(base.evidence.issuedAt),
-      String(base.timestamp),
-    ].join(":")
-    const signature = await claimant.signMessage({ message })
-    const res = await post({
-      ...base,
-      signer: claimant.address,
-      signature,
-      evidence: { ...base.evidence, evidenceHash: otherHash },
+    const res = await postEvaluate(await evaluateBody(claimant))
+    expect(res.status).toBe(503)
+    const body = await res.json()
+    expect(body.error).toBe("evaluator_signer_mismatch")
+    expect(body.signature).toBeUndefined()
+    // Restore the default fixture (matching evaluator) for later tests.
+    fakeClient.readContract.mockImplementation(async ({ functionName }: { functionName: string }) => {
+      switch (functionName) {
+        case "coverageOf":
+          return { merchant: merchant.address, claimant: claimant.address, maxPayout: 1000000000000000n, expiry: 2000000000n, status: 1 }
+        case "claimOf":
+          return { coverageId: 1n, claimant: claimant.address, evidenceHash: EVIDENCE_HASH, paidAmount: 0n, status: 1, openedAt: 1755000000n }
+        case "isNonceUsed":
+          return false
+        case "evaluatorSigner":
+          return evaluator.address
+        default:
+          throw new Error(`unexpected read: ${functionName}`)
+      }
     })
-    // The server rebuilds the attestation with the ON-CHAIN evidence hash, so
-    // the signed message no longer recovers the claimant: refused either way.
-    expect(res.status).toBe(403)
-    expect((await res.json()).error).toBe("attestation_invalid")
   })
+})
 
-  it("refuses a stale attestation (timestamp older than 5 minutes)", async () => {
-    const old = Math.floor(Date.now() / 1000) - 3600
-    const base = attestationBody({ timestamp: old })
-    const message = [
-      "resvyn:evaluate",
-      "677",
-      TEST_CONTRACT,
-      base.coverageId,
-      base.claimId,
-      EVIDENCE_HASH,
-      base.evidence.productMatches ? "1" : "0",
-      base.evidence.damageEligible ? "1" : "0",
-      base.evidence.evidenceComplete ? "1" : "0",
-      base.evidence.fileIntegrityOk ? "1" : "0",
-      base.evidence.requestedAmountWei,
-      String(base.evidence.issuedAt),
-      String(base.timestamp),
-    ].join(":")
-    const signature = await claimant.signMessage({ message })
-    const res = await post({ ...base, signer: claimant.address, signature })
-    expect(res.status).toBe(403)
-    expect((await res.json()).message).toMatch(/stale/)
-  })
-
-  it("signs a decision for a claimant-attested evidence bundle", async () => {
-    const res = await post(await signedBody(claimant))
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.signature).toMatch(/^0x[0-9a-fA-F]{130}$/)
-    // The evaluator key signs, not the claimant.
-    expect(body.signer.toLowerCase()).toBe(evaluator.address.toLowerCase())
-    expect(body.decision.claimId).toBe("1")
-    expect(body.decision.coverageId).toBe("1")
-    expect(body.decision.claimant.toLowerCase()).toBe(claimant.address.toLowerCase())
-    expect(body.decision.evidenceHash.toLowerCase()).toBe(EVIDENCE_HASH.toLowerCase())
-    expect(body.decision.amount).toBe("500000000000000")
-    expect(body.model.decision).toBe("APPROVE")
-  })
-
-  it("signs a decision for a merchant-attested evidence bundle (coverage owner)", async () => {
-    const res = await post(await signedBody(merchant))
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.signature).toMatch(/^0x[0-9a-fA-F]{130}$/)
-    expect(body.model.decision).toBe("APPROVE")
-  })
-
-  it("returns a REJECT decision for attested evidence that fails the policy", async () => {
-    const base = attestationBody()
-    // Attest damageEligible=false: the deterministic policy rejects.
-    const message = [
-      "resvyn:evaluate",
-      "677",
-      TEST_CONTRACT,
-      base.coverageId,
-      base.claimId,
-      EVIDENCE_HASH,
-      base.evidence.productMatches ? "1" : "0",
-      "0", // damageEligible signed false
-      base.evidence.evidenceComplete ? "1" : "0",
-      base.evidence.fileIntegrityOk ? "1" : "0",
-      base.evidence.requestedAmountWei,
-      String(base.evidence.issuedAt),
-      String(base.timestamp),
-    ].join(":")
-    const signature = await claimant.signMessage({ message })
-    const res = await post({
-      ...base,
-      signer: claimant.address,
-      signature,
-      evidence: { ...base.evidence, damageEligible: false },
-    })
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.model.decision).toBe("REJECT")
-    expect(body.decision.result).toBe(2)
-    expect(body.decision.amount).toBe("0")
-  })
-
-  it("fails closed with no signature when Groq is configured but the provider fails (REV-006)", async () => {
-    process.env.RESVYN_GROQ_KEY = "gsk_bogus"
-    const orig = globalThis.fetch
-    globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: "down" } }), { status: 500 })) as typeof fetch
-    try {
-      const res = await post(await signedBody(claimant))
-      // The Groq brain throws, evaluateAndSign propagates it, and the route
-      // returns an error WITHOUT a signature.
-      expect(res.status).toBe(500)
-      const body = await res.json()
-      expect(body.error).toBe("sign_failed")
-      expect(body.signature).toBeUndefined()
-    } finally {
-      globalThis.fetch = orig
-      delete process.env.RESVYN_GROQ_KEY
-    }
+describe("rate-limit keys are canonical (REV-005 round 2)", () => {
+  it("maps string id variants to the same per-claim bucket", async () => {
+    const { claimKeyFromIds } = await import("@/lib/rateLimit")
+    expect(claimKeyFromIds(1n, 1n)).toBe("claim:1:1")
+    expect(claimKeyFromIds("1", "1")).toBe("claim:1:1")
+    // The route parses ids with BigInt before rate limiting, so "01" and
+    // "+1" can never reach the key builder as separate buckets.
+    expect(claimKeyFromIds(BigInt("01"), BigInt("+1"))).toBe("claim:1:1")
   })
 })

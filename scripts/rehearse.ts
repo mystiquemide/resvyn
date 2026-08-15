@@ -82,9 +82,9 @@ function redactUrl(url: string): string {
     u.hash = "";
     return u.toString();
   } catch {
-    // Not a parseable URL: keep only the first 32 chars to avoid echoing
-    // credential-like material.
-    return url.length > 32 ? `${url.slice(0, 32)}…` : url;
+    // Not a parseable URL: never echo any part of it. Credential-like
+    // material can hide in the first characters of a malformed string.
+    return "<unparseable url redacted>";
   }
 }
 
@@ -364,7 +364,9 @@ async function main() {
   let openHash: `0x${string}`;
   let sponsored = false;
   if (paymasterUrl) {
-    console.log(`      paymaster set, checking sponsorability at ${paymasterUrl}`);
+    // REV-006 (round 2): never log the paymaster URL verbatim; credentials
+    // or tokens embedded in it would reach logs and log aggregation.
+    console.log(`      paymaster set, checking sponsorability at ${redactUrl(paymasterUrl)}`);
     const openGas = await publicClient.estimateContractGas({
       address: reserveAddress,
       abi,

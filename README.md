@@ -87,13 +87,27 @@ BOT Chain WarrantyReserve ◄── evaluator key signs EIP-712 decision
 ## Security / trust model
 
 - The evaluator signing key lives only in server env (`RESVYN_EVALUATOR_KEY`).
-- `/api/evaluate` signs **only** for an authenticated claimant or merchant
-  (EIP-191 attestation over every evidence field plus the claim binding),
-  binds the decision to live on-chain state, and **fails closed** when the
-  evidence hash, signer, amount, or provider result is invalid (REV-001,
-  REV-006).
-- Rate limits: per-client (only behind a declared trusted proxy), per-claim,
-  and global (REV-005).
+- **Evidence is server-owned (REV-001).** The claimant or merchant attests the
+  evidence CONTENT once at `POST /api/evidence`; the server requires the
+  content to hash to the claim's on-chain `evidenceHash`, so the chain
+  commitment verifiably commits to exactly the server-seen content. The
+  record is stored server-side, first-write-wins, immutable.
+- **`POST /api/evaluate` carries no evidence fields.** It accepts only claim
+  references plus a fresh EIP-191 authorization from the on-chain claimant or
+  coverage merchant, loads the server-owned evidence record bound to
+  `claim.evidenceHash`, derives every signal and the payout from it, and
+  **fails closed (no signature)** when no record exists or any check fails.
+- **Exact deployment gate (REV-002).** The route reads the contract's
+  immutable `evaluatorSigner` and requires it to match the address derived
+  from `RESVYN_EVALUATOR_KEY`; mismatches return 503 with no signature. The
+  app renders read-only unless the address is operational AND the pinned
+  `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR` (when set) matches the live signer.
+- **Fail-closed evaluation (REV-006):** when the optional Groq brain is
+  configured and the provider fails (HTTP error, timeout, malformed output,
+  schema failure), no signature is returned.
+- Rate limits: per-client (only behind a declared trusted proxy), per-claim
+  (canonical ids), and global; blocked requests never burn the global budget
+  (REV-005).
 - See `SECURITY.md` for the full model and reporting path.
 
 ## Run locally
