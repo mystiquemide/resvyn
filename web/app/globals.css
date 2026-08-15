@@ -1,0 +1,208 @@
+@import "tailwindcss";
+
+/*
+ * Resvyn design tokens. One calm palette, used with restraint.
+ * Mint canvas dominates, forest for depth, teal only as a small accent,
+ * one functional red reserved for failed/reverted states.
+ */
+@theme {
+  --color-canvas: #e6f6f5;
+  --color-inset: #d3efec;
+  --color-hairline: #c3ddd8;
+  --color-ink: #030300;
+  --color-muted: #3a5049;
+  --color-muted-2: #5c726b;
+  --color-forest: #042519;
+  --color-forest-2: #063a27;
+  --color-teal: #04cfa6;
+  --color-teal-ink: #037a62;
+  --color-fail: #c0392b;
+
+  --font-display: var(--font-fraunces), ui-serif, Georgia, serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  overflow-x: clip;
+}
+
+.skip-link {
+  position: absolute;
+  left: 16px;
+  top: -48px;
+  z-index: 80;
+  background: var(--color-forest);
+  color: var(--color-canvas);
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+.skip-link:focus {
+  top: 12px;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-teal);
+  color: var(--color-forest);
+}
+
+/* ---- shared building blocks -------------------------------------------- */
+
+.container-x {
+  width: 100%;
+  max-width: 1180px;
+  margin-inline: auto;
+  padding-inline: 24px;
+}
+
+.kicker {
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--color-muted-2);
+}
+
+.display {
+  font-family: var(--font-display);
+  font-weight: 380;
+  line-height: 1.02;
+  letter-spacing: -0.015em;
+  color: var(--color-ink);
+}
+
+.display .em {
+  font-style: italic;
+  font-weight: 420;
+}
+
+.lead {
+  color: var(--color-muted);
+  font-size: 1.125rem;
+  line-height: 1.6;
+}
+
+.link-teal {
+  color: var(--color-teal-ink);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-teal-ink) 35%, transparent);
+  transition: border-color 0.15s ease;
+}
+.link-teal:hover {
+  border-bottom-color: var(--color-teal-ink);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 0.95rem;
+  line-height: 1;
+  border-radius: 999px;
+  padding: 0.85rem 1.4rem;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.btn:focus-visible,
+.link-teal:focus-visible,
+.skip-link:focus-visible {
+  outline: 3px solid var(--color-teal);
+  outline-offset: 3px;
+}
+.btn-primary {
+  background: var(--color-forest);
+  color: var(--color-canvas);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-forest-2);
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--color-ink);
+  border-color: var(--color-hairline);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--color-forest);
+}
+.btn-on-dark {
+  background: var(--color-canvas);
+  color: var(--color-forest);
+}
+.btn-on-dark:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid var(--color-hairline);
+  border-radius: 20px;
+  box-shadow: 0 1px 2px rgba(4, 37, 25, 0.04), 0 12px 30px -18px rgba(4, 37, 25, 0.18);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-hairline);
+  background: color-mix(in srgb, var(--color-inset) 60%, #ffffff);
+  color: var(--color-muted);
+}
+
+.hairline {
+  height: 1px;
+  background: var(--color-hairline);
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+@keyframes resvyn-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-teal) 55%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--color-teal) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-teal) 0%, transparent); }
+}
+
+@keyframes resvyn-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes resvyn-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}

@@ -21,6 +21,11 @@
 # Hardhat coverage reports
 /coverage
 
+# Next.js frontend output
+/web/node_modules
+/web/.next
+/web/out
+
 # Gas snapshot files
 /.gas-snapshot
 

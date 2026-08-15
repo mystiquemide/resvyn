@@ -8,6 +8,7 @@ import {
   createPublicClient,
   createWalletClient,
   defineChain,
+  encodeFunctionData,
   formatEther,
   http,
   keccak256,
@@ -18,6 +19,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { evaluateAndSign, type DecisionBinding } from "./evaluator/service.js";
 import type { ClaimEvidence } from "./evaluator/policy.js";
+import { httpJsonRpcCaller, sendSponsoredTransaction } from "./paymaster.js";
 
 // Resvyn dress rehearsal: run the full fund -> issue -> claim -> payout flow
 // against a live chain and assert the winning invariant on-chain
@@ -313,16 +315,66 @@ async function main() {
   }
 
   // 4) Claimant opens the claim.
+  //    The buyer's own EOA must send this: openClaim enforces
+  //    msg.sender == coverage.claimant. If RESVYN_PAYMASTER_URL points at a BOT
+  //    Chain EOA-paymaster endpoint, we first ask it to sponsor this exact call
+  //    and, if it agrees, send it gasless (zero-fee, buyer pays nothing). This
+  //    is inert unless the URL is set: as of 2026-08 no public chain-677
+  //    paymaster endpoint exists, so the normal self-paid send below is the
+  //    live path. See scripts/paymaster.ts.
   console.log("[4/5] Opening claim...");
-  const openHash = await claimantClient.writeContract({
-    address: reserveAddress,
+  const paymasterUrl = process.env.RESVYN_PAYMASTER_URL?.trim();
+  const openCalldata = encodeFunctionData({
     abi,
     functionName: "openClaim",
     args: [coverageId, EVIDENCE_HASH],
   });
+  let openHash: `0x${string}`;
+  let sponsored = false;
+  if (paymasterUrl) {
+    console.log(`      paymaster set, checking sponsorability at ${paymasterUrl}`);
+    const openGas = await publicClient.estimateContractGas({
+      address: reserveAddress,
+      abi,
+      functionName: "openClaim",
+      args: [coverageId, EVIDENCE_HASH],
+      account: claimant,
+    });
+    const result = await sendSponsoredTransaction({
+      call: httpJsonRpcCaller(paymasterUrl),
+      account: claimant,
+      publicClient,
+      chain,
+      to: reserveAddress,
+      data: openCalldata,
+      gas: openGas,
+    });
+    if (result.sponsored && result.hash) {
+      openHash = result.hash;
+      sponsored = true;
+      console.log(`      sponsored (policy: ${result.policy ?? "?"}), gasless send`);
+    } else {
+      console.log("      paymaster declined, falling back to self-paid send");
+      openHash = await claimantClient.writeContract({
+        address: reserveAddress,
+        abi,
+        functionName: "openClaim",
+        args: [coverageId, EVIDENCE_HASH],
+      });
+    }
+  } else {
+    openHash = await claimantClient.writeContract({
+      address: reserveAddress,
+      abi,
+      functionName: "openClaim",
+      args: [coverageId, EVIDENCE_HASH],
+    });
+  }
   await publicClient.waitForTransactionReceipt({ hash: openHash });
   const claimId = (await read("claimCount")) as bigint;
-  console.log(`      claim #${claimId} opened  (tx ${openHash})`);
+  console.log(
+    `      claim #${claimId} opened  (tx ${openHash})${sponsored ? "  [gasless]" : ""}`,
+  );
 
   // 5) Evaluator SERVICE decides + signs; relayer resolves; payout lands.
   //    The decision is not hardcoded here: structured evidence goes through the
