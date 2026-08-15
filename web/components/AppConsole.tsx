@@ -46,6 +46,7 @@ import {
   evaluatorSignerMatches,
   explorerTx,
   isAppContractReady,
+  isArchivedProofInstance,
   isOperationalDeployment,
   warrantyReserveAbi,
 } from "@/lib/chain"
@@ -238,12 +239,36 @@ export default function AppConsole() {
   const [signed, setSigned] = useState<SignedDecision | null>(null)
   const [noWallet, setNoWallet] = useState(false)
   const [instance, setInstance] = useState({ balance: 0n, locked: 0n, free: 0n, nonceUsed: false })
-  // REV-009 round 2: rows are always re-read on refresh (no stale caching);
-  // only the historical log scan is bounded by the deployment start block.
+  // REV-001 round 3: the evidence content is built ONCE when the claim is
+  // opened and the exact snapshot is kept in state, so the hash committed
+  // on-chain is byte-identical to the content attested at /api/evidence
+  // (REV-016). issuedAt is fixed at snapshot time - never recomputed per
+  // call - so a one-second drift cannot break the commitment.
+  const [evidenceSnapshot, setEvidenceSnapshot] = useState<{
+    content: EvidenceContent
+    hash: Hex
+    claimId: string
+    coverageId: string
+  } | null>(null)
+
+  // REV-016: the attested flag belongs to a specific claim. Reset it whenever
+  // the claim/coverage references or the evidence fields change, so a stale
+  // "attested" state can never unlock evaluation for different inputs.
   const [evidenceAttested, setEvidenceAttested] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setEvidenceAttested(false)
+      setSigned(null)
+    }, 0)
+    return () => clearTimeout(t)
+  }, [evalCoverageId, evalClaimId, evidenceSnapshot, productNote, receiptNote, evidenceNote, requestedAmt, signals.damageEligible, signals.evidenceComplete, signals.fileIntegrityOk])
 
   // REV-002 round 2: when the operator pinned an expected evaluator signer,
   // the live on-chain signer must match it or the app renders read-only.
+  // REV-002 round 3: a pinned evaluator is REQUIRED for writes - without
+  // NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR, evaluatorSignerMatches returns
+  // false, so no deposit/issuance can happen before evaluator compatibility
+  // is established.
   const signerOk = evaluatorSignerMatches(EXPECTED_EVALUATOR, evaluator ?? undefined)
   const canWrite = Boolean(operational && signerOk && isConnected && onAppChain && deployed && contract && address)
 
@@ -446,6 +471,11 @@ export default function AppConsole() {
         if (opened && "claimId" in opened.args) {
           const id = String(opened.args.claimId)
           setEvalClaimId(id)
+          // REV-016: bind the committed evidence snapshot to the REAL opened
+          // claim id so attestation can never target a different claim.
+          setEvidenceSnapshot((prev) =>
+            prev ? { ...prev, claimId: id, coverageId: String(opened.args.coverageId ?? prev.coverageId) } : prev,
+          )
         }
       }
       await refresh()
@@ -507,16 +537,15 @@ export default function AppConsole() {
     )
   }
 
-  // The full evidence content the claim commits to on-chain. The claim is
-  // opened with evidenceContentHash(content), and the same content is later
-  // attested at POST /api/evidence, where the server recomputes the hash and
-  // requires it to equal the on-chain hash (REV-001 round 2).
+  // REV-001 round 3: the evidence content. productMatches is NOT a client
+  // field anymore: the server derives it by comparing noteHash(productNote)
+  // against the coverage's on-chain productHash (and receiptHash likewise).
+  // The remaining flags are self-attestations, documented as such.
   function currentEvidenceContent(): EvidenceContent {
     return {
       productNote: productNote.trim() || "resvyn-empty",
       receiptNote: receiptNote.trim() || "resvyn-empty",
       damageDescription: evidenceNote.trim(),
-      productMatches: signals.productMatches,
       damageEligible: signals.damageEligible,
       evidenceComplete: signals.evidenceComplete,
       fileIntegrityOk: signals.fileIntegrityOk,
@@ -538,35 +567,45 @@ export default function AppConsole() {
       setAction("open", { status: "failed", message: "Coverage id must be a whole number, like 1 or 2." })
       return
     }
-    // The claim is opened with the canonical evidence content hash so the
-    // on-chain commitment can later be verified by the server at intake.
+    // REV-016: build the content ONCE, keep the exact snapshot in state, and
+    // open the claim with its hash. Attestation later reuses this snapshot so
+    // the committed hash and the attested content can never drift.
     const content = currentEvidenceContent()
-    const evidenceHash = evidenceContentHash(content)
+    const hash = evidenceContentHash(content)
+    setEvidenceSnapshot({ content, hash, claimId: String(openCoverageId), coverageId: String(openCoverageId) })
     await send("open", "Open claim", () =>
       writeContract({
         address: contract,
         abi: warrantyReserveAbi,
         functionName: "openClaim",
-        args: [coverageId, evidenceHash],
+        args: [coverageId, hash],
       }),
     )
   }
 
-  // REV-001 round 2 step 1: attest the evidence content to the server. The
+  // REV-001 round 3 step 1: attest the evidence content to the server. The
   // claimant/merchant signs the intake message; the server verifies the
-  // content hashes to the on-chain claim.evidenceHash and stores it
-  // server-side (first write wins).
+  // content hashes to the on-chain claim.evidenceHash, derives product/
+  // receipt matches against the coverage's on-chain hashes, and stores the
+  // record server-side (first write wins, claim-bound).
   async function onAttestEvidence() {
     if (!walletClient || !address) {
       setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to attest evidence." })
+      return
+    }
+    // REV-016: attest the EXACT snapshot that was committed when the claim
+    // was opened. Rebuilding the content now could drift (issuedAt, notes)
+    // and produce a hash that no longer matches the on-chain commitment.
+    if (!evidenceSnapshot) {
+      setAction("evaluate", { status: "failed", message: "Open the claim first: the evidence snapshot committed on-chain is required for attestation." })
       return
     }
     setAction("evaluate", { status: "pending", message: "Waiting for your evidence signature…" })
     try {
       const coverageId = String(BigInt(evalCoverageId))
       const claimId = String(BigInt(evalClaimId))
-      const content = currentEvidenceContent()
-      const evidenceHash = evidenceContentHash(content)
+      const content = evidenceSnapshot.content
+      const evidenceHash = evidenceSnapshot.hash
       const timestamp = Math.floor(Date.now() / 1000)
       const msg = intakeMessage({
         chainId: APP_CHAIN.id,
@@ -776,7 +815,7 @@ export default function AppConsole() {
 
   const gate = useMemo(() => {
     // REV-002: the archived proof instance is read-only, whatever the wallet.
-    if (deployed && !operational) {
+    if (deployed && isArchivedProofInstance(APP_CONTRACT_ADDRESS)) {
       return {
         tone: "warn" as Tone,
         title: "This is the archived proof instance (read-only)",
@@ -786,12 +825,15 @@ export default function AppConsole() {
     }
     // REV-002 round 2: the pinned expected evaluator signer must match the
     // live on-chain signer, or the deployment cannot settle anything.
-    if (deployed && EXPECTED_EVALUATOR && !signerOk) {
+    // REV-002 round 3: a pinned evaluator manifest is REQUIRED — without
+    // NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR the app is read-only too.
+    if (deployed && !signerOk) {
       return {
         tone: "warn" as Tone,
-        title: "Evaluator signer mismatch (read-only)",
-        body:
-          "This deployment's on-chain evaluator signer does not match NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR, so no decision signed here could ever settle. All writes are disabled until the deployment manifest is corrected.",
+        title: EXPECTED_EVALUATOR ? "Evaluator signer mismatch (read-only)" : "Evaluator signer not pinned (read-only)",
+        body: EXPECTED_EVALUATOR
+          ? "This deployment's on-chain evaluator signer does not match NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR, so no decision signed here could ever settle. All writes are disabled until the deployment manifest is corrected."
+          : "No evaluator signer is pinned (NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is unset), so evaluator compatibility cannot be verified. All writes are disabled until the operator pins the expected signer.",
       }
     }
     if (!deployed) {
@@ -816,7 +858,7 @@ export default function AppConsole() {
       }
     }
     return null
-  }, [deployed, isConnected, onAppChain, chainId, operational])
+  }, [deployed, isConnected, onAppChain, chainId, operational, signerOk])
 
   const busy = Object.values(txs).some((t) => t.status === "pending") || connecting || switching
 
@@ -1031,10 +1073,9 @@ export default function AppConsole() {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 12 }}>
                 {(
                   [
-                    ["productMatches", "Product matches"],
-                    ["damageEligible", "Damage eligible"],
-                    ["evidenceComplete", "Evidence complete"],
-                    ["fileIntegrityOk", "File integrity ok"],
+                    ["damageEligible", "Damage eligible (self-attested)"],
+                    ["evidenceComplete", "Evidence complete (self-attested)"],
+                    ["fileIntegrityOk", "File integrity ok (self-attested)"],
                   ] as const
                 ).map(([key, label]) => (
                   <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.82rem", color: "var(--color-muted)" }}>
@@ -1046,6 +1087,9 @@ export default function AppConsole() {
                     {label}
                   </label>
                 ))}
+                <span style={{ fontSize: "0.78rem", color: "var(--color-muted-2)" }}>
+                  Product/receipt match is derived server-side from the coverage&apos;s on-chain hashes.
+                </span>
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
                 <button className="btn btn-primary" onClick={() => void onAttestEvidence()} disabled={!canWrite || busy} style={{ padding: "0.6rem 1rem" }}>

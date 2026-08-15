@@ -112,6 +112,9 @@ export function evaluate(evidence: ClaimEvidence, ctx: PolicyContext): ModelDeci
   if (ctx.seenEvidenceHashes.has(evidence.evidenceHash.toLowerCase())) {
     return reject("DUPLICATE_EVIDENCE", v)
   }
+  // REV-001 round 3: a future-dated claim would make (asOf - issuedAt)
+  // negative and bypass the staleness window; treat it as stale regardless.
+  if (evidence.issuedAt > ctx.asOf + 300n) return reject("STALE_CLAIM", v)
   if (ctx.asOf - evidence.issuedAt > ctx.stalenessWindow) {
     return reject("STALE_CLAIM", v)
   }

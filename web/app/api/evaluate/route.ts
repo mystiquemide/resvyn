@@ -15,8 +15,8 @@ import {
   type DecisionBinding,
 } from "@/lib/evaluator.server"
 import { groqBrain, isGroqConfigured } from "@/lib/groqBrain"
-import { getEvidence } from "@/lib/evidenceStore"
-import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds } from "@/lib/rateLimit"
+import { getEvidence, getSeenEvidenceHashes } from "@/lib/evidenceStore"
+import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds, consumeGlobalBudget } from "@/lib/rateLimit"
 import {
   AttestationError,
   verifyEvaluateAuthorization,
@@ -238,7 +238,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "authorization_invalid", message: "Authorization could not be verified." }, { status: 403 })
   }
 
-  // 9) REV-001 round 2: load the SERVER-OWNED evidence record bound to the
+  // 9) REV-001 round 3: load the SERVER-OWNED evidence record bound to the
   //    on-chain evidence hash. No record -> fail closed, no signature.
   const record = getEvidence(claim.evidenceHash as `0x${string}`)
   if (!record) {
@@ -260,11 +260,25 @@ export async function POST(req: Request) {
       { status: 503 },
     )
   }
+  // REV-017: the record is claim-bound. A second claim reusing the same
+  // public evidence hash must NOT be able to borrow the first claim's record.
+  if (record.claimId !== claimId.toString() || record.coverageId !== coverageId.toString()) {
+    return NextResponse.json(
+      {
+        error: "evidence_claim_mismatch",
+        message: `The stored evidence record for this hash was attested for claim #${record.claimId} on coverage #${record.coverageId}, not claim #${claimId} on coverage #${coverageId}. A claim must attest its own evidence.`,
+      },
+      { status: 409 },
+    )
+  }
 
   // 10) Build evidence EXCLUSIVELY from the stored record + chain state.
+  //     REV-001 round 3: productMatches/receiptMatches come from the
+  //     SERVER-DERIVED comparison against the coverage's on-chain
+  //     productHash/receiptHash, never from the claimant's assertions.
   const nowSec = BigInt(Math.floor(Date.now() / 1000))
   const evidence: ClaimEvidence = {
-    productMatches: record.content.productMatches,
+    productMatches: record.derived.productMatches && record.derived.receiptMatches,
     damageEligible: record.content.damageEligible,
     evidenceComplete: record.content.evidenceComplete,
     fileIntegrityOk: record.content.fileIntegrityOk,
@@ -285,7 +299,29 @@ export async function POST(req: Request) {
     decisionTtl: DECISION_TTL,
   }
 
-  // 11) Evaluate + sign. Policy may APPROVE or REJECT; both are signed
+  // 11) REV-017: seed the policy's duplicate-evidence set with hashes already
+  //     attested for OTHER claims. The same public evidence hash used by a
+  //     second claim is rejected as DUPLICATE_EVIDENCE instead of passing.
+  const seenHashes = getSeenEvidenceHashes(claimId.toString())
+
+  // 12) REV-005 round 3: the global signing budget is consumed ONLY at the
+  //     point of signing, so an unauthenticated flood of valid-looking
+  //     requests cannot exhaust it for legitimate users.
+  const global = consumeGlobalBudget()
+  if (!global.allowed) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: `Server is at capacity. Retry in ${Math.ceil(global.retryAfterMs / 1000)}s.`,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil(global.retryAfterMs / 1000)) },
+      },
+    )
+  }
+
+  // 13) Evaluate + sign. Policy may APPROVE or REJECT; both are signed
   //     decisions the contract verifies. evaluateAndSign only throws (no
   //     signature) on malformed output or an over-cap approval. REV-006: any
   //     Groq/provider failure FAILS CLOSED (no signature).
@@ -293,6 +329,7 @@ export async function POST(req: Request) {
     const account = privateKeyToAccount(key)
     const { model, decision, signature, signer } = await evaluateAndSign(evidence, binding, account, {
       brain: isGroqConfigured() ? groqBrain : undefined,
+      seenEvidenceHashes: seenHashes,
     })
     return NextResponse.json({
       model,

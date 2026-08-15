@@ -3,79 +3,74 @@
 This file records how each finding from the review in `CODE_REVIEW.md`
 (PR #1) was addressed, plus the round-2 re-audit findings on PR #2
 (REV-001r2, REV-002r2, REV-005r2, REV-007r2, REV-009r2, REV-013r2, and the
-Paymaster log item). Each entry lists the fix and its verification.
+Paymaster log item) and the round-3 re-audit findings on PR #2 head
+ef58d71 (REV-001r3, REV-016, REV-017, REV-002r3, REV-005r3, durable
+evidence storage). Each entry lists the fix and its verification.
 
 ## High
 
-### REV-001: Public evaluator endpoint signs caller-controlled eligibility — FIXED (round 2)
+### REV-001: Public evaluator endpoint signs caller-controlled eligibility — FIXED (round 3)
 
-Round 1 introduced an EIP-191 evidence attestation signed by the claimant or
-merchant, but the request body still carried the evidence fields the signer
-chose. The re-audit correctly noted that this proved provenance, not truth:
-the beneficiary still selected the facts that authorize payout.
+Round 2 moved the facts OUT of the evaluate request into a server-owned
+evidence store, but the claimant still chose the facts at intake. The round-3
+re-audit correctly noted that this proves provenance, not truth, and that a
+future issuedAt bypassed the staleness check.
 
-Round 2 moves the facts OUT of the evaluate request entirely:
+Round 3 changes WHAT is verified, not just WHO signs:
 
-- `web/lib/evidenceContent.ts` (new): canonical, order-independent
-  serialization of the evidence content and `evidenceContentHash(content)`.
-  The claim must be opened with this hash, so the on-chain commitment
-  verifiably commits to exactly the server-seen content.
-- `web/app/api/evidence/route.ts` (new): authenticated intake. The claimant
-  or merchant attests the CONTENT; the server requires the content to hash
-  to the claim's ON-CHAIN evidence hash, the claim to be open and bound to
-  the submitted coverage, and the signer to be claimant or merchant. The
-  record is stored server-side, first-write-wins (immutable).
-- `web/lib/evidenceStore.ts` (new): server-owned store keyed by the on-chain
-  hash. Single-instance (documented), bounded, immutable.
-- `web/app/api/evaluate/route.ts`: the request body now carries ONLY
-  `{coverageId, claimId, signer, signature, timestamp}` — no evidence
-  fields, no amount. The route loads the server-owned record bound to
-  `claim.evidenceHash` and FAILS CLOSED (409, no signature) when no record
-  exists. All signals and the payout amount are derived from the stored
-  record + live chain state.
-- `web/lib/evaluateAuth.ts`: split into `intakeMessage`/`verifyEvidenceIntake`
-  and `evaluateMessage`/`verifyEvaluateAuthorization`. The evaluate message
-  binds only chain/verifier/claim/coverage/timestamp.
-- `web/components/AppConsole.tsx`: two-step flow — "Attest evidence to
-  server" (POST /api/evidence) then "Evaluate" (POST /api/evaluate with
-  references only). The claim is opened with `evidenceContentHash(content)`.
+- **Server-derived eligibility (REV-001r3):** the intake route now derives
+  `productMatches` and `receiptMatches` SERVER-SIDE by comparing
+  `noteHash(productNote)` / `noteHash(receiptNote)` against the coverage's
+  on-chain `productHash` / `receiptHash` — the merchant committed those at
+  issuance, so the comparison is independent of the claimant's assertions.
+  The claimant's `productMatches` field was REMOVED from the evidence content
+  entirely; the evaluate route uses `record.derived.productMatches &&
+  record.derived.receiptMatches`. A product note that does not match the
+  coverage hash yields a signed REJECT (PRODUCT_MISMATCH), not an approval.
+- **Future-dated evidence rejected:** intake returns 400 `future_issued_at`
+  when `issuedAt > now + 300s`, and the policy (web + scripts, parity-tested)
+  rejects `issuedAt > asOf + 300` as STALE_CLAIM.
+- **Repositioning:** README/SECURITY now position Resvyn as a
+  **self-attestation scheme with server-side structural verification** — not
+  independent AI evidence verification. The remaining flags
+  (damageEligible, evidenceComplete, fileIntegrityOk) are explicitly labeled
+  self-attestations.
+- Tests: `route.test.ts` — future issuedAt refused, product-note mismatch
+  derives `productMatches=false` and evaluates to REJECT/PRODUCT_MISMATCH,
+  matching notes derive true and evaluate to APPROVE.
 
-Contradictory submissions and settlement races are impossible: the store is
-first-write-wins per on-chain hash, and evaluation reads the single stored
-record.
+### REV-016 (round 3, new): Browser evidence commitments are not stable — FIXED
+- `web/components/AppConsole.tsx`: the evidence content is now built ONCE
+  when the claim is opened and the exact snapshot (content + hash + claimId +
+  coverageId) is kept in `evidenceSnapshot` state. Attestation reuses that
+  snapshot instead of rebuilding, so a one-second `issuedAt` drift can never
+  change the hash between openClaim and /api/evidence.
+- The snapshot is bound to the REAL opened claim id after the ClaimOpened
+  event, and `evidenceAttested`/`signed` reset whenever the claim references
+  or any evidence field changes.
+- Attestation without a snapshot fails with a clear message ("Open the claim
+  first").
 
-Tests: `web/app/api/evaluate/route.test.ts` — intake refuses content that
-does not commit to the on-chain hash, unauthorized signers, stale
-attestations; stores claimant/merchant records; re-submission is refused
-(409); evaluate fails closed without a record, refuses unauthorized or stale
-authorizations, signs claimant/merchant-authorized evaluations, returns
-policy REJECT for attested ineligible evidence, and fails closed on provider
-outage.
+### REV-017 (round 3, new): Evidence records are not claim-bound — FIXED
+- `web/lib/evidenceStore.ts`: `StoredEvidence` now carries `claimId` and
+  `coverageId`. `web/app/api/evaluate/route.ts` refuses
+  `evidence_claim_mismatch` (409, no signature) when the record bound to the
+  hash was attested for a different claim/coverage, so a second claim
+  reusing the same public hash cannot borrow the first claim's record.
+- Duplicate detection: `getSeenEvidenceHashes(claimId)` seeds the policy's
+  `seenEvidenceHashes` with hashes attested for OTHER claims, so the same
+  evidence hash across claims is rejected as DUPLICATE_EVIDENCE.
+- Tests: claim-reuse refused with `evidence_claim_mismatch`; seen-hash set
+  contains the other claim's hash.
 
-### REV-002: Default app can create irreversible locked exposure on an obsolete signer instance — FIXED (round 2)
-
-Round 1 gated writes on a non-proof address + `NEXT_PUBLIC_RESVYN_OPERATIONAL=1`,
-but the gate never verified the EVALUATOR. The re-audit correctly noted a
-misconfigured deployment could accept deposits and lock coverage while
-returning signatures the contract can never settle.
-
-Round 2 makes the gate exact (chain/address/on-chain-signer/server-signer):
-
-- `web/app/api/evaluate/route.ts`: reads the contract's immutable
-  `evaluatorSigner` and requires it to EXACTLY match the address derived from
-  `RESVYN_EVALUATOR_KEY`. Mismatch returns 503 `evaluator_signer_mismatch`
-  with no signature.
-- `web/app/api/evidence/route.ts`: refuses intake for the archived proof
-  instance.
-- `web/lib/chain.ts`: `EXPECTED_EVALUATOR` +
-  `evaluatorSignerMatches()` — the client renders read-only when the pinned
-  expected signer does not match the live on-chain signer.
-- `web/components/AppConsole.tsx`: `canWrite` requires the signer match;
-  a dedicated "Evaluator signer mismatch (read-only)" gate is shown.
-
-Tests: `route.test.ts` asserts 503 `evaluator_signer_mismatch` when the mock
-contract's evaluator differs from the server key; `route.archived.test.ts`
-asserts the archived instance is refused before any chain read.
+### REV-002: Deployment gate — FIXED (round 3)
+- Round 2 added the exact server-side gate (on-chain `evaluatorSigner` must
+  equal the address derived from `RESVYN_EVALUATOR_KEY`). Round 3 closes the
+  client gap: a pinned evaluator is now REQUIRED for writes —
+  `evaluatorSignerMatches()` returns false when
+  `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR` is unset, so deposits/issuance stay
+  disabled until the operator pins the expected signer. The gate useMemo
+  dependency array now includes `signerOk`.
 
 ### REV-003: Coverage expiry is stored but never enforced or released — FIXED (round 1, unchanged)
 - `contracts/WarrantyReserve.sol`: `openClaim` reverts `CoverageAlreadyExpired`
@@ -94,18 +89,26 @@ asserts the archived instance is refused before any chain read.
 
 ## Medium
 
-### REV-005: Rate limiting trusts spoofable proxy headers and process-local state — FIXED (round 2)
+### REV-005: Rate limiting trusts spoofable proxy headers and process-local state — FIXED (round 3)
 - `web/lib/rateLimit.ts`: forwarding headers only trusted behind
-  `RESVYN_TRUST_PROXY=1`. Round 2: (a) when identity is untrusted ("shared"),
-  the per-client bucket is SKIPPED so one caller cannot exhaust an
-  "everyone" allowance — abuse stays bounded by per-claim + global budgets;
-  (b) budgets are checked client -> claim -> global BEFORE any consumption,
-  so an already-blocked request never burns the global allowance for other
-  clients; (c) hits are only recorded after every check passed.
+  `RESVYN_TRUST_PROXY=1`. Round 2: (a) untrusted identity ("shared") skips the
+  per-client bucket so one caller cannot exhaust an "everyone" allowance;
+  (b) budgets checked before any consumption. Round 3: the global budget is
+  split into `consumeGlobalBudget()`, called ONLY at the signing/write point —
+  an unauthenticated flood of syntactically valid requests with unique claim
+  ids can no longer exhaust the global allowance for legitimate users.
 - Both routes parse ids with `BigInt` BEFORE rate limiting, so "1", "01",
   and "+1" all map to the same canonical per-claim key.
-- Tests: `web/lib/rateLimit.test.ts` — proxy trust, per-claim, global, no
-  global burn on blocked requests, no shared client bucket, canonical keys.
+- Tests: `web/lib/rateLimit.test.ts` — proxy trust, per-claim, global
+  consumed only at signing, no global burn on blocked requests, no shared
+  client bucket, canonical keys.
+
+### REV-005r3 / persistence (round 3, new): Evidence persistence is not deployment-safe — FIXED
+- `web/lib/evidenceStore.ts` now persists records to a JSON file
+  (`RESVYN_EVIDENCE_STORE_PATH`, default `./data/evidence-store.json`) with
+  atomic replace on every write and load-on-start. A restart or cold start no
+  longer loses attested evidence, and the limitation note now requires a
+  shared file volume (or a shared store) for multi-instance deployments.
 
 ### REV-006: Groq/provider failures fail open to APPROVE — FIXED
 - `web/lib/groqBrain.ts`: any provider failure (HTTP, timeout, malformed,
@@ -196,13 +199,13 @@ asserts the archived instance is refused before any chain read.
 npm ci && npx hardhat compile && npx hardhat test          # 102 passing
 
 # Evaluator parity (root)
-node --test --import tsx parity/evaluator.parity.test.ts   # 6 passing
+node --test --import tsx parity/evaluator.parity.test.ts   # 7 passing
 
 # Web
 cd web && npm ci
 npm run lint                                               # 0 errors
 npm run typecheck                                          # clean
-npm test                                                   # 37 passing
+npm test                                                   # 44 passing
 npm run build                                              # production build
 npm audit --omit=dev                                       # 0 vulnerabilities
 ```

@@ -27,6 +27,9 @@
 /web/out
 /web/tsconfig.tsbuildinfo
 
+# Runtime evidence store (durable, operator-owned; never committed)
+/web/data
+
 # Gas snapshot files
 /.gas-snapshot
 

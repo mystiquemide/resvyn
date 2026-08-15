@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
-import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds, resetRateLimiterForTests } from "./rateLimit"
+import { checkRateLimit, consumeGlobalBudget, clientKeyFromRequest, claimKeyFromIds, resetRateLimiterForTests } from "./rateLimit"
 
 // The limiter keeps module-level state; tests reset it explicitly.
 const KEY = "test-client"
@@ -65,30 +65,49 @@ describe("checkRateLimit", () => {
   })
 
   // REV-005: the global budget protects the server even when a caller rotates
-  // client identities.
-  it("caps total traffic across all client keys", () => {
+  // client identities. It is consumed at the signing point (consumeGlobalBudget).
+  it("caps total traffic via the global budget", () => {
     process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "3"
-    expect(checkRateLimit("a-1").allowed).toBe(true)
-    expect(checkRateLimit("a-2").allowed).toBe(true)
-    expect(checkRateLimit("a-3").allowed).toBe(true)
-    expect(checkRateLimit("a-4").allowed).toBe(false)
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(false)
   })
 
   // REV-005 round 2: an already-blocked client must NOT burn the global
   // budget for other clients, and a blocked claim must not burn it either.
+  // (checkRateLimit never touches the global bucket at all; consumeGlobalBudget
+  // is called separately at the signing point.)
   it("does not consume the global budget for requests blocked by client or claim limits", () => {
     process.env.RESVYN_RATE_LIMIT_MAX = "2"
     process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "3"
     // Client A exhausts its own bucket after 2 hits.
-    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(true) // global 1
-    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(true) // global 2
-    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(false) // client-blocked, global untouched
-    // Client B gets the remaining global allowance: exactly 1 more hit. If
-    // A's blocked request had consumed global, B would be blocked outright.
-    expect(checkRateLimit("blocked-b", "claim:9:9").allowed).toBe(true) // global 3
-    expect(checkRateLimit("blocked-b", "claim:9:9").allowed).toBe(false) // global-blocked
-    // Global is exhausted at 3 recorded hits (2 from A + 1 from B), not 4.
-    expect(checkRateLimit("fresh-c", "claim:8:8").allowed).toBe(false)
+    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(true)
+    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(true)
+    expect(checkRateLimit("blocked-a", "claim:9:9").allowed).toBe(false) // client-blocked
+    // Client B still has its own allowance: checkRateLimit ignores global.
+    expect(checkRateLimit("blocked-b", "claim:9:9").allowed).toBe(true)
+    // The global budget is consumed only by consumeGlobalBudget, which the
+    // routes call at the signing point.
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(false) // global exhausted at 3
+  })
+
+  // REV-005 round 3: the global budget is consumed ONLY at the signing point,
+  // so an unauthenticated flood of syntactically valid requests with unique
+  // claim ids cannot exhaust it (those requests never reach signing).
+  it("consumes the global budget only when explicitly called at signing", () => {
+    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "2"
+    // A flood of unique claims passes the cheap check without touching global.
+    for (let i = 0; i < 50; i++) {
+      expect(checkRateLimit("shared", `claim:${i}:1`).allowed).toBe(true)
+    }
+    // The signing point still has its full allowance.
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(true)
+    expect(consumeGlobalBudget().allowed).toBe(false)
   })
 
   // REV-005 round 2: without a trusted proxy there is NO shared per-client
@@ -96,7 +115,6 @@ describe("checkRateLimit", () => {
   // bounded by the per-claim and global budgets.
   it("skips the per-client bucket for the untrusted shared identity", () => {
     process.env.RESVYN_RATE_LIMIT_MAX = "2" // would block a normal client at 3
-    process.env.RESVYN_RATE_LIMIT_GLOBAL_MAX = "1000"
     process.env.RESVYN_RATE_LIMIT_CLAIM_MAX = "100"
     // 20 requests all using the shared identity with different claims all pass.
     for (let i = 0; i < 20; i++) {

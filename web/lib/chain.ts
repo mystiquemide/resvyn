@@ -333,7 +333,15 @@ export function isArchivedProofInstance(addr: string): boolean {
 }
 
 export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): boolean {
-  return !isArchivedProofInstance(addr) && process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL === "1"
+  // REV-002 round 3: an operational deployment requires the evaluator pin
+  // too. Without NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR the app is read-only,
+  // so no deposit/issuance can happen before evaluator compatibility is
+  // established.
+  return (
+    !isArchivedProofInstance(addr) &&
+    process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL === "1" &&
+    Boolean(process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR)
+  )
 }
 
 /**
@@ -341,11 +349,17 @@ export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): bo
  * NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is set, the live contract's immutable
  * evaluatorSigner must match it or the app renders read-only. The server
  * enforces the authoritative check (on-chain signer vs RESVYN_EVALUATOR_KEY).
+ *
+ * REV-002 round 3: a pinned evaluator is REQUIRED for writes. Without
+ * NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR this returns false, so deposits,
+ * issuance, and claims stay disabled until the operator pins the expected
+ * signer — a misconfigured deployment can no longer lock funds before
+ * evaluator compatibility is established.
  */
 export const EXPECTED_EVALUATOR = process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR?.toLowerCase()
 
 export function evaluatorSignerMatches(expected: string | undefined, live: string | undefined): boolean {
-  if (!expected) return true // operator did not pin an expected signer
+  if (!expected) return false // writes require a pinned evaluator manifest
   if (!live) return false // cannot verify yet
   return expected === live.toLowerCase()
 }

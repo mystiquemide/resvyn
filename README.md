@@ -4,10 +4,27 @@
 
 Resvyn is a merchant-funded warranty reserve on BOT Chain. A merchant locks
 native BOT, issues buyer-bound coverage whose full maximum payout is reserved
-upfront, and a bounded AI-assisted evaluator signs EIP-712 decisions that
-settle claims directly from the locked reserve.
+upfront, and a bounded evaluator signs EIP-712 decisions that settle claims
+directly from the locked reserve.
 
 > **Winning invariant: "No funded reserve, no valid coverage."**
+
+## Evidence model (read this first)
+
+Resvyn is a **self-attestation scheme with server-side structural
+verification** — not independent AI evidence verification:
+
+- The claimant or merchant attests the evidence content once; the server
+  verifies the content commits to the claim's on-chain evidence hash, that
+  the signer owns the claim, and — independently of the claimant — that the
+  product/receipt notes hash to the coverage's on-chain
+  `productHash`/`receiptHash` committed at issuance.
+- Product/receipt match are DERIVED SERVER-SIDE from those on-chain
+  commitments. The remaining flags (damage eligibility, evidence
+  completeness, file integrity) are self-attestations and are labeled as
+  such in the UI and docs.
+- A claim whose product note does not match the coverage hash is rejected
+  (PRODUCT_MISMATCH), never approved.
 
 ## Status
 
@@ -78,7 +95,7 @@ BOT Chain WarrantyReserve ◄── evaluator key signs EIP-712 decision
 - `scripts/evaluator/` — original policy/schema/signing service (used by
   rehearsal).
 - `web/lib/evaluator.server.ts` — web port of the evaluator; **parity-tested
-  byte-for-byte against the scripts version** (`web/lib/evaluator.parity.test.ts`).
+  byte-for-byte against the scripts version** (`parity/evaluator.parity.test.ts`).
 - `web/app/api/evaluate/route.ts` — signed-decision endpoint.
 - `web/components/AppConsole.tsx` — wallet console (read-only for archived
   proof instance).
@@ -130,17 +147,20 @@ npm run build
 ```
 
 The web app reads from the Mainnet proof contract by default and renders it
-**read-only**. To enable writes against an operational deployment:
+**read-only**. To enable writes against an operational deployment, the
+operator must pin the evaluator:
 
 ```bash
 NEXT_PUBLIC_RESVYN_ADDRESS=<operational-contract-address> \
 NEXT_PUBLIC_RESVYN_OPERATIONAL=1 \
+NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR=<on-chain evaluatorSigner> \
 npm run dev
 ```
 
 Server env for the evaluator route (never committed): `RESVYN_EVALUATOR_KEY`
 (required to sign), `RESVYN_GROQ_KEY` (optional brain), `RESVYN_RATE_LIMIT_*`,
-`RESVYN_TRUST_PROXY`.
+`RESVYN_TRUST_PROXY`, `RESVYN_EVIDENCE_STORE_PATH` (durable evidence store,
+default `./data/evidence-store.json`).
 
 ## Rehearsal
 

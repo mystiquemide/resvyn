@@ -29,15 +29,30 @@ before public disclosure unless coordinated otherwise.
   the on-chain claim claimant or coverage merchant; the server requires the
   content's canonical hash to equal the claim's on-chain `evidenceHash`, so
   the chain commitment verifiably commits to the server-seen content. The
-  record is stored server-side (first-write-wins, immutable) and evaluation
-  derives all signals and the payout from it. A missing record, a stale or
-  forged authorization, or a cross-claim reference returns no signature.
+  record is stored server-side (first-write-wins, immutable, claim-bound) and
+  evaluation derives all signals and the payout from it. A missing record, a
+  stale or forged authorization, or a cross-claim reference returns no
+  signature.
+- **Server-derived verification (REV-001r3):** `productMatches` and
+  `receiptMatches` are DERIVED SERVER-SIDE by hashing the evidence's
+  product/receipt notes and comparing against the coverage's on-chain
+  `productHash`/`receiptHash` committed at issuance. The remaining flags
+  (damageEligible, evidenceComplete, fileIntegrityOk) are self-attestations;
+  Resvyn is a self-attestation scheme with server-side structural
+  verification, not an independent AI evidence verifier. Future-dated
+  evidence is refused at intake and rejected as stale by the policy.
 - **Exact deployment gate (REV-002):** the route reads the contract's
   immutable `evaluatorSigner` and requires it to equal the address derived
   from `RESVYN_EVALUATOR_KEY`. The archived Mainnet proof instance is
   read-only: the route refuses to sign for it, and the app renders write
   controls only for a non-proof address with `NEXT_PUBLIC_RESVYN_OPERATIONAL=1`
-  and (when pinned) a matching `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR`.
+  AND a pinned `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR` matching the live
+  signer. Without the pin, writes stay disabled.
+- **Durable evidence storage:** records persist to
+  `RESVYN_EVIDENCE_STORE_PATH` (default `./data/evidence-store.json`, atomic
+  replace). A multi-instance deployment must share that volume or use a
+  shared store; the server does not silently drop attested evidence on
+  restart.
 - **Fail-closed evaluation (REV-006):** when the optional Groq brain is
   configured and the provider fails (HTTP error, timeout, malformed output,
   schema failure), no signature is returned. An outage pauses the Groq path;

@@ -7,16 +7,16 @@ import {
   isArchivedProofInstance,
   warrantyReserveAbi,
 } from "@/lib/chain"
-import { evidenceContentHash, type EvidenceContent } from "@/lib/evidenceContent"
+import { evidenceContentHash, noteHash, type EvidenceContent } from "@/lib/evidenceContent"
 import { putEvidence } from "@/lib/evidenceStore"
 import {
   AttestationError,
   verifyEvidenceIntake,
   type EvidenceIntakeAttestation,
 } from "@/lib/evaluateAuth"
-import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds } from "@/lib/rateLimit"
+import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds, consumeGlobalBudget } from "@/lib/rateLimit"
 
-// REV-001 (round 2): server-owned evidence intake.
+// REV-001 (round 3): server-owned evidence intake with server-derived checks.
 //
 // The claimant or merchant attests the evidence CONTENT under their key. The
 // server:
@@ -25,7 +25,13 @@ import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds } from "@/lib/rat
 //      verifiably commits to exactly this server-seen content);
 //   2. requires the claim to be open and bound to the submitted coverage;
 //   3. requires the signer to be the on-chain claimant or coverage merchant;
-//   4. stores the record server-side, first-write-wins (immutable).
+//   4. DERIVES productMatches and receiptMatches server-side by comparing
+//      keccak(productNote)/keccak(receiptNote) against the coverage's on-chain
+//      productHash/receiptHash - the merchant committed those at issuance, so
+//      this is independent of whatever the claimant asserts;
+//   5. rejects future-dated issuedAt (would bypass the staleness check);
+//   6. stores the record server-side, first-write-wins (immutable), bound to
+//      the claim and coverage it was attested for (REV-017).
 //
 // POST /api/evaluate then reads ONLY this store - the evaluate request
 // carries no evidence fields at all - and refuses to sign when no record
@@ -37,7 +43,6 @@ const ContentSchema = z.object({
   productNote: z.string().min(1).max(2000),
   receiptNote: z.string().min(1).max(2000),
   damageDescription: z.string().max(4000).default(""),
-  productMatches: z.boolean(),
   damageEligible: z.boolean(),
   evidenceComplete: z.boolean(),
   fileIntegrityOk: z.boolean(),
@@ -80,7 +85,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bad_request", message: "coverageId and claimId must be positive integers." }, { status: 400 })
   }
 
-  // 1) Rate limit with canonical keys (REV-005 round 2).
+  // 1) Cheap per-client/per-claim rate limit (global budget is only consumed
+  //    when a record is actually stored, REV-005 round 3).
   const limit = checkRateLimit(
     clientKeyFromRequest(req),
     claimKeyFromIds(coverageId, claimId),
@@ -136,7 +142,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "coverage_mismatch", message: `Claim #${claimId} belongs to coverage #${claim.coverageId}, not #${coverageId}.` }, { status: 422 })
   }
 
-  // 4) Verify the attestation: content must commit to the on-chain hash and
+  // 4) REV-001 round 3: reject future-dated damage claims. A future issuedAt
+  //    would make the policy's staleness window (asOf - issuedAt) negative
+  //    and bypass it. Allow a small clock-skew grace.
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (parsed.evidence.issuedAt > nowSec + 300) {
+    return NextResponse.json(
+      { error: "future_issued_at", message: "issuedAt is in the future; evidence cannot be dated after submission." },
+      { status: 400 },
+    )
+  }
+
+  // 5) Verify the attestation: content must commit to the on-chain hash and
   //    the signer must be claimant or merchant.
   const content: EvidenceContent = parsed.evidence
   const att: EvidenceIntakeAttestation = {
@@ -163,22 +180,56 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "attestation_invalid", message: "Attestation could not be verified." }, { status: 403 })
   }
 
-  // 5) Store server-side, first-write-wins (immutable). The route hashes the
-  //    content itself; the stored key is the on-chain hash.
+  // 6) REV-001 round 3: derive the verifiable eligibility facts SERVER-SIDE
+  //    from the on-chain coverage commitments. The claimant's assertions are
+  //    audit-only for these fields; the decision uses these derived values.
+  const derivedProductMatches =
+    noteHash(content.productNote).toLowerCase() ===
+    (coverage.productHash as `0x${string}`).toLowerCase()
+  const derivedReceiptMatches =
+    noteHash(content.receiptNote).toLowerCase() ===
+    (coverage.receiptHash as `0x${string}`).toLowerCase()
+
+  // 7) Store server-side, first-write-wins (immutable), claim-bound. The
+  //    route hashes the content itself; the stored key is the on-chain hash.
   const stored = putEvidence(claim.evidenceHash as `0x${string}`, {
     content,
+    derived: {
+      productMatches: derivedProductMatches,
+      receiptMatches: derivedReceiptMatches,
+    },
     submittedBy,
-    submittedAt: Math.floor(Date.now() / 1000),
+    submittedAt: nowSec,
     chainId: APP_CHAIN.id,
     verifier: contract,
+    claimId: claimId.toString(),
+    coverageId: coverageId.toString(),
   })
   if (!stored.ok) {
     return NextResponse.json({ error: "evidence_conflict", message: stored.reason ?? "Evidence already stored." }, { status: 409 })
+  }
+
+  // 8) Global budget consumed only when a record is actually written
+  //    (REV-005 round 3): garbage or unauthorized requests cannot exhaust the
+  //    global signing allowance for legitimate users.
+  const global = consumeGlobalBudget()
+  if (!global.allowed) {
+    return NextResponse.json(
+      {
+        error: "rate_limited",
+        message: `Server is at capacity. Retry in ${Math.ceil(global.retryAfterMs / 1000)}s.`,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(Math.ceil(global.retryAfterMs / 1000)) },
+      },
+    )
   }
 
   return NextResponse.json({
     ok: true,
     evidenceHash: evidenceContentHash(content),
     submittedBy,
+    derived: { productMatches: derivedProductMatches, receiptMatches: derivedReceiptMatches },
   })
 }

@@ -111,6 +111,18 @@ describe("evaluator parity scripts vs web (REV-010)", async () => {
     assert.equal(web.decision.expiry, fixture.asOf + fixture.decisionTtl);
   });
 
+  it("both reject a future-dated claim as stale (REV-001r3)", async () => {
+    const futureDated = { ...goodEvidence, issuedAt: fixture.asOf + 3600n }
+    const [script, web] = await Promise.all([
+      scriptsEvaluateAndSign(futureDated, binding(), account),
+      webEvaluateAndSign(futureDated, binding(), account),
+    ])
+    assert.equal(web.model.decision, "REJECT")
+    assert.equal(web.model.reasonCode, "STALE_CLAIM")
+    assert.deepEqual(script.model, web.model)
+    assert.equal(script.signature, web.signature)
+  })
+
   it("both refuse a mismatched evidence hash", async () => {
     const wrongHash = { ...goodEvidence, evidenceHash: ("0x" + "22".repeat(32)) as `0x${string}` };
     await assert.rejects(scriptsEvaluateAndSign(wrongHash, binding(), account), /does not match/);

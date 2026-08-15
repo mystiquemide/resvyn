@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest"
 import { privateKeyToAccount } from "viem/accounts"
 import { keccak256, stringToHex } from "viem"
-import { evidenceContentHash } from "@/lib/evidenceContent"
+import { evidenceContentHash, noteHash } from "@/lib/evidenceContent"
 import { resetEvidenceStoreForTests } from "@/lib/evidenceStore"
 import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
 
@@ -36,7 +36,6 @@ const evidenceContent = {
   productNote: "Alpine kettle, batch A12",
   receiptNote: "Store ticket 1842",
   damageDescription: "Cracked base after normal use",
-  productMatches: true,
   damageEligible: true,
   evidenceComplete: true,
   fileIntegrityOk: true,
@@ -64,25 +63,46 @@ vi.mock("@/lib/chain", async (importOriginal) => {
 })
 
 const fakeClient = {
-  readContract: vi.fn(async ({ functionName }: { functionName: string }) => {
+  readContract: vi.fn(async ({ functionName, args }: { functionName: string; args?: unknown[] }) => {
     switch (functionName) {
-      case "coverageOf":
+      case "coverageOf": {
+        const id = Number((args?.[0] as bigint) ?? 1n)
+        // Coverage 1's on-chain hashes commit to the fixture notes; coverage 2
+        // commits to a DIFFERENT product so derived productMatches differs.
+        if (id === 2) {
+          return {
+            merchant: merchant.address,
+            claimant: claimant.address,
+            productHash: noteHash("coverage-two-product"),
+            receiptHash: noteHash("coverage-two-receipt"),
+            maxPayout: 1000000000000000n,
+            expiry: 2000000000n,
+            status: 1,
+          }
+        }
         return {
           merchant: merchant.address,
           claimant: claimant.address,
+          productHash: noteHash(evidenceContent.productNote),
+          receiptHash: noteHash(evidenceContent.receiptNote),
           maxPayout: 1000000000000000n, // 0.001 BOT
           expiry: 2000000000n,
           status: 1,
         }
-      case "claimOf":
+      }
+      case "claimOf": {
+        const id = Number((args?.[0] as bigint) ?? 1n)
+        // Claim 1 is the fixture claim; claim 2 reuses the SAME evidence hash
+        // to test claim-bound records (REV-017).
         return {
-          coverageId: 1n,
+          coverageId: BigInt(id),
           claimant: claimant.address,
           evidenceHash: fixtureEvidenceHash,
           paidAmount: 0n,
           status: 1, // Open
           openedAt: 1755000000n,
         }
+      }
       case "isNonceUsed":
         return false
       case "evaluatorSigner":
@@ -151,20 +171,20 @@ async function intakeBody(
 
 async function evaluateBody(
   signer: ReturnType<typeof privateKeyToAccount>,
-  overrides: { timestamp?: number } = {},
+  overrides: { timestamp?: number; coverageId?: string; claimId?: string } = {},
 ) {
   const timestamp = overrides.timestamp ?? Math.floor(Date.now() / 1000)
   const msg = evaluateMessage({
     chainId: 677,
     verifier: TEST_CONTRACT,
-    coverageId: "1",
-    claimId: "1",
+    coverageId: overrides.coverageId ?? "1",
+    claimId: overrides.claimId ?? "1",
     timestamp,
   })
   const signature = await signer.signMessage({ message: msg })
   return {
-    coverageId: "1",
-    claimId: "1",
+    coverageId: overrides.coverageId ?? "1",
+    claimId: overrides.claimId ?? "1",
     signer: signer.address,
     signature,
     timestamp,
@@ -196,11 +216,58 @@ describe("POST /api/evidence (REV-001 round 2)", () => {
 
   it("refuses evidence whose content does not commit to the on-chain hash", async () => {
     const body = await intakeBody(claimant, {
-      content: { ...evidenceContent, productMatches: false },
+      content: { ...evidenceContent, damageEligible: false },
     })
     const res = await postIntake(body)
     expect(res.status).toBe(403)
     expect((await res.json()).error).toBe("attestation_invalid")
+  })
+
+  it("refuses evidence dated in the future (would bypass staleness)", async () => {
+    const body = await intakeBody(claimant, {
+      content: { ...evidenceContent, issuedAt: Math.floor(Date.now() / 1000) + 3600 },
+    })
+    const res = await postIntake(body)
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe("future_issued_at")
+  })
+
+  it("stores evidence whose product note commits to the coverage's on-chain product hash", async () => {
+    const res = await postIntake(await intakeBody(claimant))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.derived.productMatches).toBe(true)
+    expect(body.derived.receiptMatches).toBe(true)
+  })
+
+  it("derives productMatches=false when the note does not match the coverage hash (REV-001r3)", async () => {
+    // Coverage 2 commits to different product/receipt hashes (see mock).
+    const mismatched = { ...evidenceContent, productNote: "some other product" }
+    const mismatchedHash = evidenceContentHash(mismatched)
+    setFixtureEvidenceHash(mismatchedHash) // claim 2's on-chain hash
+    const timestamp = Math.floor(Date.now() / 1000)
+    const msg = intakeMessage({
+      chainId: 677,
+      verifier: TEST_CONTRACT,
+      coverageId: "2",
+      claimId: "2",
+      evidenceHash: mismatchedHash,
+      content: mismatched,
+      timestamp,
+    })
+    const signature = await claimant.signMessage({ message: msg })
+    const res = await postIntake({
+      coverageId: "2",
+      claimId: "2",
+      evidence: mismatched,
+      signer: claimant.address,
+      signature,
+      timestamp,
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.derived.productMatches).toBe(false)
   })
 
   it("refuses evidence signed by a key that owns neither claim nor coverage", async () => {
@@ -322,6 +389,70 @@ describe("POST /api/evaluate (REV-001 round 2)", () => {
     expect(body.decision.amount).toBe("0")
   })
 
+  it("returns a REJECT when the product note does not match the coverage hash (REV-001r3)", async () => {
+    resetEvidenceStoreForTests()
+    // Claim 2's coverage commits to different product/receipt hashes, so the
+    // server-derived productMatches is false even though the claimant
+    // attested a well-formed bundle.
+    const mismatchedContent = { ...evidenceContent, productNote: "some other product" }
+    const hash = evidenceContentHash(mismatchedContent)
+    setFixtureEvidenceHash(hash)
+    const timestamp = Math.floor(Date.now() / 1000)
+    const msg = intakeMessage({
+      chainId: 677,
+      verifier: TEST_CONTRACT,
+      coverageId: "2",
+      claimId: "2",
+      evidenceHash: hash,
+      content: mismatchedContent,
+      timestamp,
+    })
+    const signature = await claimant.signMessage({ message: msg })
+    const intake = await postIntake({
+      coverageId: "2",
+      claimId: "2",
+      evidence: mismatchedContent,
+      signer: claimant.address,
+      signature,
+      timestamp,
+    })
+    expect(intake.status).toBe(200)
+    expect((await intake.json()).derived.productMatches).toBe(false)
+    const res = await postEvaluate(await evaluateBody(claimant, { coverageId: "2", claimId: "2" }))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.model.decision).toBe("REJECT")
+    expect(body.model.reasonCode).toBe("PRODUCT_MISMATCH")
+  })
+
+  it("refuses to reuse another claim's evidence record (REV-017 claim-bound)", async () => {
+    resetEvidenceStoreForTests()
+    // Claim 1 attests its evidence; claim 2 uses the SAME public evidence
+    // hash on-chain (mock returns fixtureEvidenceHash for every claim).
+    await postIntake(await intakeBody(claimant))
+    // Evaluate claim 2: the record is bound to claim 1 -> refuse.
+    const res = await postEvaluate(await evaluateBody(claimant, { coverageId: "2", claimId: "2" }))
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body.error).toBe("evidence_claim_mismatch")
+    expect(body.signature).toBeUndefined()
+  })
+
+  it("rejects duplicate evidence across claims via the seen-hash set (REV-017)", async () => {
+    resetEvidenceStoreForTests()
+    // Claim 1 attests evidence with hash H. Claim 2's on-chain evidenceHash
+    // is ALSO H (same public hash). The claim-bound check refuses first, but
+    // even if the store were shared, the seen-hash seeding must make the
+    // policy treat H as duplicate for claim 2.
+    await postIntake(await intakeBody(claimant))
+    const seen = (await import("@/lib/evidenceStore")).getSeenEvidenceHashes("2")
+    expect(seen.has(EVIDENCE_HASH.toLowerCase())).toBe(true)
+    // And evaluating claim 2 is refused outright (claim-bound).
+    const res = await postEvaluate(await evaluateBody(claimant, { coverageId: "2", claimId: "2" }))
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toBe("evidence_claim_mismatch")
+  })
+
   it("fails closed with no signature when Groq is configured but the provider fails (REV-006)", async () => {
     resetEvidenceStoreForTests()
     await postIntake(await intakeBody(claimant)) // seed the record
@@ -370,7 +501,7 @@ describe("POST /api/evaluate deployment gate (REV-002 round 2)", () => {
       // Default fixture behavior for every other read.
       switch (functionName) {
         case "coverageOf":
-          return { merchant: merchant.address, claimant: claimant.address, maxPayout: 1000000000000000n, expiry: 2000000000n, status: 1 }
+          return { merchant: merchant.address, claimant: claimant.address, productHash: noteHash(evidenceContent.productNote), receiptHash: noteHash(evidenceContent.receiptNote), maxPayout: 1000000000000000n, expiry: 2000000000n, status: 1 }
         case "claimOf":
           return { coverageId: 1n, claimant: claimant.address, evidenceHash: EVIDENCE_HASH, paidAmount: 0n, status: 1, openedAt: 1755000000n }
         case "isNonceUsed":
@@ -388,7 +519,7 @@ describe("POST /api/evaluate deployment gate (REV-002 round 2)", () => {
     fakeClient.readContract.mockImplementation(async ({ functionName }: { functionName: string }) => {
       switch (functionName) {
         case "coverageOf":
-          return { merchant: merchant.address, claimant: claimant.address, maxPayout: 1000000000000000n, expiry: 2000000000n, status: 1 }
+          return { merchant: merchant.address, claimant: claimant.address, productHash: noteHash(evidenceContent.productNote), receiptHash: noteHash(evidenceContent.receiptNote), maxPayout: 1000000000000000n, expiry: 2000000000n, status: 1 }
         case "claimOf":
           return { coverageId: 1n, claimant: claimant.address, evidenceHash: EVIDENCE_HASH, paidAmount: 0n, status: 1, openedAt: 1755000000n }
         case "isNonceUsed":

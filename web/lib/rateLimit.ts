@@ -14,12 +14,18 @@
  * global budgets instead. Rotating arbitrary x-forwarded-for values gains
  * nothing.
  *
- * Budgets (REV-005): every request consumes a GLOBAL bucket and a per-claim
- * bucket, so one claim cannot be drained by many IPs and one caller cannot
- * burn the whole server budget. Budgets are checked client -> claim -> global
- * BEFORE anything is consumed, so an already-blocked request never burns the
- * global allowance for other clients. Memory is bounded: the map is swept on
- * every call and hard-capped, with eviction starting at the oldest activity.
+ * Budgets (REV-005 round 3):
+ *  - checkRateLimit(): per-client (trusted proxy only) + per-claim budgets.
+ *    Cheap; called early on every request. Never consumes the global budget.
+ *  - consumeGlobalBudget(): the GLOBAL signing allowance. Called ONLY when a
+ *    request is about to do the expensive/authoritative thing (write an
+ *    evidence record, or sign a decision). An unauthenticated caller flooding
+ *    syntactically valid requests with unique claim ids cannot exhaust the
+ *    global budget for legitimate users, because those requests never reach
+ *    the global consumption point (no record, no signature).
+ * Budgets are checked BEFORE anything is consumed, so an already-blocked
+ * request never burns another client's allowance. Memory is bounded: the map
+ * is swept on every call and hard-capped, with eviction at oldest activity.
  *
  * Config (server env, gitignored):
  *   RESVYN_RATE_LIMIT_MAX         max requests per window per client (default 10)
@@ -102,12 +108,22 @@ function recordHit(key: string, now: number): void {
   state.hits.set(key, times)
 }
 
+function blocked(key: string, now: number): RateLimitResult {
+  const times = state.hits.get(key) ?? []
+  const retryAfterMs = Math.max(0, (times[0] ?? now) + state.windowMs - now)
+  return { allowed: false, retryAfterMs, remaining: 0 }
+}
+
 export interface RateLimitResult {
   allowed: boolean
   retryAfterMs: number
   remaining: number
 }
 
+/**
+ * Per-client (trusted proxy only) + per-claim budgets. Cheap, early gate.
+ * Does NOT consume or check the global budget (see consumeGlobalBudget).
+ */
 export function checkRateLimit(
   clientKey: string,
   claimKey?: string,
@@ -117,26 +133,37 @@ export function checkRateLimit(
   sweep(now)
   evictOldest(now)
 
-  // REV-005 round 2: NEVER consume a budget for a request that is already
-  // blocked. Client and claim buckets are checked first, global last, and
-  // hits are only recorded after every check passed.
-  const checkOrder: Array<[string, number]> = []
-  if (clientKey !== "shared") checkOrder.push([clientKey, state.max])
-  if (claimKey) checkOrder.push([claimKey, state.claimMax])
-  checkOrder.push(["__global__", state.globalMax])
+  const keys: Array<[string, number]> = []
+  if (clientKey !== "shared") keys.push([clientKey, state.max])
+  if (claimKey) keys.push([claimKey, state.claimMax])
 
-  for (const [key, budget] of checkOrder) {
-    if (liveCount(key, now) >= budget) {
-      const times = state.hits.get(key) ?? []
-      const retryAfterMs = Math.max(0, (times[0] ?? now) + state.windowMs - now)
-      return { allowed: false, retryAfterMs, remaining: 0 }
-    }
+  for (const [key, budget] of keys) {
+    if (liveCount(key, now) >= budget) return blocked(key, now)
   }
+  for (const [key] of keys) recordHit(key, now)
 
-  // All checks passed: record the hit in every bucket.
-  for (const [key] of checkOrder) recordHit(key, now)
-  const remaining = clientKey === "shared" ? state.globalMax : state.max - liveCount(clientKey, now)
+  const remaining = clientKey === "shared"
+    ? state.claimMax - (claimKey ? liveCount(claimKey, now) : 0)
+    : state.max - liveCount(clientKey, now)
   return { allowed: true, retryAfterMs: 0, remaining: Math.max(0, remaining) }
+}
+
+/**
+ * Global signing allowance. Call ONLY right before the authoritative action
+ * (storing an evidence record / signing a decision). This prevents an
+ * unauthenticated flood of valid-looking requests from exhausting the global
+ * budget for legitimate users (REV-005 round 3).
+ */
+export function consumeGlobalBudget(): RateLimitResult {
+  readConfig()
+  const now = Date.now()
+  sweep(now)
+  evictOldest(now)
+
+  const key = "__global__"
+  if (liveCount(key, now) >= state.globalMax) return blocked(key, now)
+  recordHit(key, now)
+  return { allowed: true, retryAfterMs: 0, remaining: state.globalMax - liveCount(key, now) }
 }
 
 /** Test-only: clear all tracked buckets. Never called by a route. */
