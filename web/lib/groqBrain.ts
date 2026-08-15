@@ -21,8 +21,11 @@ import { evaluate, type ClaimEvidence, type PolicyContext } from "./evaluator.se
  *    forbids using it to flip a typed signal, and the hard-signal gate makes
  *    that impossible in code regardless of the prompt.
  *  - Every failure (no key, timeout, HTTP error, malformed JSON, schema fail)
- *    falls back to the deterministic policy decision. A Groq outage can never
- *    block settlement or produce a bad signature (NFR-008, NFR-010).
+ *    FAILS CLOSED (REV-006): the brain throws GroqProviderError and the route
+ *    returns no signature. A Groq outage never blocks settlement with a
+ *    self-approved decision; it pauses the Groq path until the provider is
+ *    healthy. When RESVYN_GROQ_KEY is absent, the deterministic policy IS the
+ *    brain (server-side rule, not caller input), so the route still works.
  *
  * This module is imported ONLY from the route handler and never reaches the
  * client bundle. The key lives in server env (RESVYN_GROQ_KEY), gitignored.
@@ -157,10 +160,16 @@ async function callGroq(evidence: ClaimEvidence, ctx: PolicyContext): Promise<Mo
 }
 
 /**
- * Groq-backed evaluator brain. Safe default: when Groq is not configured or
- * anything in the call fails, the deterministic policy decision is returned so
- * the route behaves exactly as before (NFR-008, NFR-010).
+ * Groq-backed evaluator brain. REV-006: FAILS CLOSED. When Groq is not
+ * configured the deterministic policy is the brain (it runs server-side on
+ * attested evidence and is a legitimate, documented fallback for the
+ * no-key configuration). But when Groq IS configured and the provider call
+ * fails in any way (HTTP error, timeout, malformed JSON, schema failure),
+ * this throws GroqProviderError: the route must return no signature. An
+ * outage must never silently convert into an approval.
  */
+export class GroqProviderError extends Error {}
+
 export async function groqBrain(
   evidence: ClaimEvidence,
   ctx: PolicyContext,
@@ -169,32 +178,40 @@ export async function groqBrain(
   const gate = policyDecision(evidence, ctx)
   if (gate.decision === "REJECT") return gate
 
-  // 2) Groq proposes. Any failure falls back to the gate decision (APPROVE
-  //    up to requested, which is the pre-Groq behavior).
+  // 2) Groq proposes. REV-006: any failure is a hard failure - no signature.
+  let proposed: ModelDecision
   try {
-    const proposed = await callGroq(evidence, ctx)
-    const model = ModelDecisionSchema.parse(proposed)
-
-    if (model.decision === "APPROVE") {
-      return {
-        ...model,
-        approvedAmount: clampAmount(model.approvedAmount, evidence.requestedAmount, ctx.maxPayout),
-        reasonCode: "ELIGIBLE_DAMAGE_VERIFIED",
-        modelVersion: canonicalVersion(),
-      }
+    proposed = await callGroq(evidence, ctx)
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e)
+    if (process.env.RESVYN_GROQ_DEBUG) {
+      console.error("[groqBrain] provider failure, failing closed:", detail)
     }
+    throw new GroqProviderError(
+      `Groq provider failure; refusing to sign (${detail}). Retry when the provider is healthy.`,
+    )
+  }
+
+  const model = ModelDecisionSchema.safeParse(proposed)
+  if (!model.success) {
+    throw new GroqProviderError(
+      `Groq output failed schema validation; refusing to sign (${model.error.message}).`,
+    )
+  }
+
+  if (model.data.decision === "APPROVE") {
     return {
-      decision: "REJECT",
-      approvedAmount: "0",
-      reasonCode: model.reasonCode,
-      confidenceBand: model.confidenceBand,
+      ...model.data,
+      approvedAmount: clampAmount(model.data.approvedAmount, evidence.requestedAmount, ctx.maxPayout),
+      reasonCode: "ELIGIBLE_DAMAGE_VERIFIED",
       modelVersion: canonicalVersion(),
     }
-  } catch (e) {
-    // Safe fallback: the deterministic approval the gate already computed.
-    if (process.env.RESVYN_GROQ_DEBUG) {
-      console.error("[groqBrain] falling back to policy:", e instanceof Error ? e.message : String(e))
-    }
-    return gate
+  }
+  return {
+    decision: "REJECT",
+    approvedAmount: "0",
+    reasonCode: model.data.reasonCode,
+    confidenceBand: model.data.confidenceBand,
+    modelVersion: canonicalVersion(),
   }
 }

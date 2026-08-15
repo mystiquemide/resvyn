@@ -30,7 +30,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 contract WarrantyReserve is EIP712, ReentrancyGuard {
     enum CoverageStatus {
         None,
-        Active
+        Active,
+        Expired
     }
 
     struct Coverage {
@@ -52,6 +53,8 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
     error ZeroMaxPayout();
     error InvalidClaimant();
     error InvalidExpiry();
+    error CoverageAlreadyExpired();
+    error CoverageNotExpired();
     error InsufficientFreeReserve(uint256 freeReserve, uint256 requested);
     error WithdrawalExceedsFreeReserve(uint256 freeReserve, uint256 requested);
     error WithdrawalTransferFailed();
@@ -65,6 +68,12 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
         uint64 expiry
     );
     event ReserveWithdrawn(address indexed merchant, uint256 amount, uint256 newBalance);
+    event CoverageExpired(
+        uint256 indexed coverageId,
+        address indexed merchant,
+        uint256 maxPayout,
+        uint64 expiry
+    );
 
     /// @notice The evaluator signer. Set once at deployment; no setter exists.
     ///         Only decisions signed by this key settle claims (BR-007).
@@ -210,6 +219,33 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
         emit CoverageIssued(coverageId, msg.sender, claimant, maxPayout, expiry);
     }
 
+    /// @notice Permissionlessly expire an unused, past-expiry coverage and
+    ///         release its locked exposure exactly once.
+    /// @dev REV-003: coverage expiry is now a lifecycle invariant, not just
+    ///      metadata. A coverage whose window has passed and which never had a
+    ///      claim opened can be expired by anyone, releasing the full
+    ///      maxPayout lock back to the merchant's free reserve. A coverage
+    ///      with an already-open claim is intentionally NOT expirable: the
+    ///      claim opened while the coverage was active remains settleable by
+    ///      a valid evaluator decision (documented grace rule), so the lock
+    ///      is only released through settlement. The Expired status is
+    ///      terminal, so the lock can never be released twice.
+    /// @param coverageId The coverage to expire.
+    function expireCoverage(uint256 coverageId) external {
+        Coverage storage cov = _coverage[coverageId];
+        if (cov.status != CoverageStatus.Active) revert CoverageNotActive();
+        if (block.timestamp < cov.expiry) revert CoverageNotExpired();
+        if (_claimOfCoverage[coverageId] != 0) revert ClaimAlreadyExists();
+
+        cov.status = CoverageStatus.Expired;
+        // Issuance added exactly `cov.maxPayout` to locked exposure; this is
+        // the only release path for an unclaimed coverage, so it cannot
+        // underflow (BR-011 accounting invariant).
+        _lockedExposure[cov.merchant] -= cov.maxPayout;
+
+        emit CoverageExpired(coverageId, cov.merchant, cov.maxPayout, cov.expiry);
+    }
+
     /// @notice Withdraw from the caller's merchant reserve.
     /// @dev BR-003 / FR-005: withdrawal cannot reduce reserve below locked
     ///      exposure. State is updated before the external transfer.
@@ -237,6 +273,7 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
     {
         Coverage storage cov = _coverage[coverageId];
         if (cov.status != CoverageStatus.Active) revert CoverageNotActive();
+        if (block.timestamp >= cov.expiry) revert CoverageAlreadyExpired();
         if (msg.sender != cov.claimant) revert NotClaimant();
         if (evidenceHash == bytes32(0)) revert ZeroEvidenceHash();
         if (_claimOfCoverage[coverageId] != 0) revert ClaimAlreadyExists();

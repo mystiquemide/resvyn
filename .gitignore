@@ -25,6 +25,7 @@
 /web/node_modules
 /web/.next
 /web/out
+/web/tsconfig.tsbuildinfo
 
 # Gas snapshot files
 /.gas-snapshot
@@ -40,6 +41,7 @@
 /PROJECT_STATE.MD
 /FUNDING.md
 
-# Keep all local markdown docs out of the repo
-*.md
-*.MD
+# Local-only note files (explicit names only; tracked Markdown is welcome,
+# REV-014)
+/scratchpad.md
+/notes.md

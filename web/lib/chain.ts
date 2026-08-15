@@ -144,6 +144,13 @@ export const warrantyReserveAbi = [
     ],
     outputs: [{ name: "", type: "bool" }],
   },
+  {
+    type: "function",
+    name: "expireCoverage",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "coverageId", type: "uint256" }],
+    outputs: [],
+  },
   { type: "function", name: "withdrawReserve", stateMutability: "nonpayable", inputs: [{ name: "amount", type: "uint256" }], outputs: [] },
 
   {
@@ -210,6 +217,7 @@ export const warrantyReserveAbi = [
   { type: "event", name: "ClaimPaid", inputs: [{ name: "claimId", type: "uint256", indexed: true }, { name: "coverageId", type: "uint256", indexed: true }, { name: "claimant", type: "address", indexed: true }, { name: "amount", type: "uint256", indexed: false }, { name: "modelVersion", type: "bytes32", indexed: false }, { name: "nonce", type: "uint256", indexed: false }] },
   { type: "event", name: "ClaimRejected", inputs: [{ name: "claimId", type: "uint256", indexed: true }, { name: "coverageId", type: "uint256", indexed: true }, { name: "claimant", type: "address", indexed: true }, { name: "modelVersion", type: "bytes32", indexed: false }, { name: "nonce", type: "uint256", indexed: false }] },
   { type: "event", name: "ReserveWithdrawn", inputs: [{ name: "merchant", type: "address", indexed: true }, { name: "amount", type: "uint256", indexed: false }, { name: "newBalance", type: "uint256", indexed: false }] },
+  { type: "event", name: "CoverageExpired", inputs: [{ name: "coverageId", type: "uint256", indexed: true }, { name: "merchant", type: "address", indexed: true }, { name: "maxPayout", type: "uint256", indexed: false }, { name: "expiry", type: "uint64", indexed: false }] },
 
   { type: "error", name: "InsufficientFreeReserve", inputs: [{ name: "freeReserve", type: "uint256" }, { name: "requested", type: "uint256" }] },
   { type: "error", name: "WithdrawalExceedsFreeReserve", inputs: [{ name: "freeReserve", type: "uint256" }, { name: "requested", type: "uint256" }] },
@@ -223,6 +231,8 @@ export const warrantyReserveAbi = [
   { type: "error", name: "ZeroMaxPayout", inputs: [] },
   { type: "error", name: "InvalidClaimant", inputs: [] },
   { type: "error", name: "InvalidExpiry", inputs: [] },
+  { type: "error", name: "CoverageAlreadyExpired", inputs: [] },
+  { type: "error", name: "CoverageNotExpired", inputs: [] },
   { type: "error", name: "WithdrawalTransferFailed", inputs: [] },
   { type: "error", name: "ZeroEvaluatorSigner", inputs: [] },
   { type: "error", name: "ZeroEvidenceHash", inputs: [] },
@@ -248,6 +258,16 @@ export const MAINNET_CHAIN_ID = 677
 /** Live WarrantyReserve on Mainnet 677. Override with NEXT_PUBLIC_RESVYN_ADDRESS if needed. */
 export const APP_CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_RESVYN_ADDRESS ||
   "0x414592d2313d233b673b1f97803c261355ccd996") as `0x${string}`
+
+/**
+ * REV-009: first block the app ever needs to read from. The recorded proof
+ * deployment happened at block 19219910 on chain 677; scanning from block 0
+ * on every refresh is unbounded and redundant. Override with
+ * NEXT_PUBLIC_DEPLOY_START_BLOCK when pointing at a different deployment.
+ */
+export const DEPLOY_START_BLOCK = BigInt(
+  process.env.NEXT_PUBLIC_DEPLOY_START_BLOCK || "19219910",
+)
 
 export const PROOF = {
   chainId: 677,
@@ -291,3 +311,27 @@ export const PROOF = {
 } as const
 
 export const MAINNET_RPC = "https://rpc.botchain.ai"
+
+/* ------------------------------------------------------------------ *
+ * REV-002: deployment manifest gate
+ * ------------------------------------------------------------------ */
+
+/**
+ * The recorded Mainnet proof instance is ARCHIVED. Its evaluator signer is
+ * immutable and documented as no longer in use, so no new funded position may
+ * be created against it. Writes are enabled only for a fresh, manifest-verified
+ * operational deployment:
+ *   - NEXT_PUBLIC_RESVYN_ADDRESS must point at a NON-proof contract, AND
+ *   - NEXT_PUBLIC_RESVYN_OPERATIONAL must be exactly "1" (the operator's
+ *     explicit acknowledgement for that address).
+ * Every other configuration renders the app read-only (REV-002).
+ */
+export const ARCHIVED_PROOF_ADDRESS = PROOF.contract
+
+export function isArchivedProofInstance(addr: string): boolean {
+  return addr.toLowerCase() === ARCHIVED_PROOF_ADDRESS.toLowerCase()
+}
+
+export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): boolean {
+  return !isArchivedProofInstance(addr) && process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL === "1"
+}

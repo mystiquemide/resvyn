@@ -140,7 +140,7 @@ export default function ReserveLookup() {
       {!result && !error && (
         <p style={{ marginTop: 22, fontSize: "0.9rem", color: "var(--color-muted)", display: "flex", gap: 8, alignItems: "center" }}>
           <StatusDot tone="idle" />
-          Enter an address to read the live reserve. Paste any merchant address, or tap 'Use the proof merchant'.
+          Enter an address to read the live reserve. Paste any merchant address, or tap &apos;Use the proof merchant&apos;.
         </p>
       )}
     </section>

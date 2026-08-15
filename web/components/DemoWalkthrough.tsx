@@ -181,8 +181,8 @@ export default function DemoWalkthrough() {
   useEffect(() => {
     if (!playing) return
     if (done) {
-      setPlaying(false)
-      return
+      const t = setTimeout(() => setPlaying(false), 0)
+      return () => clearTimeout(t)
     }
     timer.current = setTimeout(() => setI((v) => Math.min(v + 1, STEPS.length)), 1150)
     return () => {

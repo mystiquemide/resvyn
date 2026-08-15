@@ -2,7 +2,12 @@ import { NextResponse } from "next/server"
 import { createPublicClient, http, getAddress, isHex } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 import { z } from "zod"
-import { APP_CHAIN, APP_CONTRACT_ADDRESS, warrantyReserveAbi } from "@/lib/chain"
+import {
+  APP_CHAIN,
+  APP_CONTRACT_ADDRESS,
+  isArchivedProofInstance,
+  warrantyReserveAbi,
+} from "@/lib/chain"
 import {
   evaluateAndSign,
   EvaluatorError,
@@ -10,19 +15,34 @@ import {
   type DecisionBinding,
 } from "@/lib/evaluator.server"
 import { groqBrain, isGroqConfigured } from "@/lib/groqBrain"
-import { checkRateLimit, clientKeyFromRequest } from "@/lib/rateLimit"
+import { checkRateLimit, clientKeyFromRequest, claimKeyFromIds } from "@/lib/rateLimit"
+import {
+  AttestationError,
+  verifyEvidenceAttestation,
+  type EvidenceAttestation,
+} from "@/lib/evaluateAuth"
 
 // The evaluator API. The bounded brain proposes a decision, the schema gate
 // refuses malformed output, and the decision is bound to the LIVE on-chain
 // claim (chain 677) before it is signed with the dedicated evaluator key.
 //
-// Trust boundary rules honored here:
-//  - The signing key is read from server env (RESVYN_EVALUATOR_KEY) only. If it
-//    is absent, the route returns an honest "not configured" error and NEVER a
-//    fake or self-generated signature.
+// Trust boundary rules honored here (REV-001):
+//  - The caller MUST be the on-chain claim claimant or the coverage merchant
+//    and MUST sign a canonical EIP-191 attestation over every evidence field
+//    plus the claim/coverage/chain binding. An anonymous caller, a
+//    cross-claim caller, or a caller who tampers with any evidence field or
+//    amount cannot obtain a signature: the recovered signer is checked
+//    against live chain state and the signed evidence hash against the
+//    on-chain claim.
 //  - chainId, verifier, claimId, coverageId, claimant, evidenceHash, and the
-//    coverage cap all come from the chain, never from the request body, so the
-//    caller cannot retarget a decision at a different claim, chain, or amount.
+//    coverage cap all come from the chain, never from the request body, so
+//    the caller cannot retarget a decision at a different claim, chain, or
+//    amount.
+//  - The signing key is read from server env (RESVYN_EVALUATOR_KEY) only. If
+//    it is absent, the route returns an honest "not configured" error and
+//    NEVER a fake or self-generated signature.
+//  - REV-002: the archived Mainnet proof instance is read-only; the route
+//    refuses to sign for it even with a valid attestation.
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
@@ -39,8 +59,13 @@ const BodySchema = z.object({
     evidenceComplete: z.boolean(),
     fileIntegrityOk: z.boolean(),
     requestedAmountWei: z.string().regex(/^\d+$/, "requestedAmountWei must be decimal wei"),
-    issuedAtSecondsAgo: z.number().int().nonnegative().max(315360000).optional(),
+    issuedAt: z.number().int().nonnegative(),
   }),
+  // EIP-191 signature over the canonical attestation message (see
+  // web/lib/evaluateAuth.ts). Proves the caller owns this claim.
+  signer: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+  timestamp: z.number().int().nonnegative(),
 })
 
 function toId(v: string | number): bigint {
@@ -59,8 +84,19 @@ function serializeDecision(d: Record<string, unknown>) {
 
 export async function POST(req: Request) {
   // 0) Rate limit: the signing endpoint must not be freely spammable. 429 with
-  //    Retry-After when a client exceeds RESVYN_RATE_LIMIT_MAX per window.
-  const limit = checkRateLimit(clientKeyFromRequest(req))
+  //    Retry-After when a client exceeds a budget. The client key only uses
+  //    forwarding headers behind a trusted proxy (REV-005); the per-claim
+  //    budget applies regardless of identity.
+  let limit
+  try {
+    const bodyForLimit = await req.clone().json()
+    limit = checkRateLimit(
+      clientKeyFromRequest(req),
+      claimKeyFromIds(String(bodyForLimit?.coverageId ?? ""), String(bodyForLimit?.claimId ?? "")),
+    )
+  } catch {
+    limit = checkRateLimit(clientKeyFromRequest(req))
+  }
   if (!limit.allowed) {
     return NextResponse.json(
       {
@@ -86,7 +122,21 @@ export async function POST(req: Request) {
     )
   }
 
-  // 2) Evaluator key must be configured server-side. No key, no signature.
+  // 2) REV-002: refuse to sign for the archived proof instance. Its evaluator
+  //    key is no longer in use; a signature would be unrelayable at best and
+  //    a false promise of a live settlement path at worst.
+  if (isArchivedProofInstance(APP_CONTRACT_ADDRESS)) {
+    return NextResponse.json(
+      {
+        error: "archived_instance_read_only",
+        message:
+          "The configured contract is the archived Mainnet proof instance, which is read-only. No evaluator decision will be signed for it. Point NEXT_PUBLIC_RESVYN_ADDRESS at a verified operational deployment.",
+      },
+      { status: 403 },
+    )
+  }
+
+  // 3) Evaluator key must be configured server-side. No key, no signature.
   const rawKey = process.env.RESVYN_EVALUATOR_KEY?.trim()
   if (!rawKey) {
     return NextResponse.json(
@@ -106,7 +156,7 @@ export async function POST(req: Request) {
     )
   }
 
-  // 3) Parse and validate the request body.
+  // 4) Parse and validate the request body.
   let parsed
   try {
     parsed = BodySchema.parse(await req.json())
@@ -128,7 +178,7 @@ export async function POST(req: Request) {
   const contract = getAddress(APP_CONTRACT_ADDRESS)
   const client = createPublicClient({ chain: APP_CHAIN, transport: http() })
 
-  // 4) Read the LIVE claim and coverage state. The binding comes from here.
+  // 5) Read the LIVE claim and coverage state. The binding comes from here.
   let coverage, claim, nonceUsed: boolean
   try {
     ;[coverage, claim, nonceUsed] = await Promise.all([
@@ -143,7 +193,7 @@ export async function POST(req: Request) {
     )
   }
 
-  // 5) State gates, so the UI gets a clean reason instead of a raw revert.
+  // 6) State gates, so the UI gets a clean reason instead of a raw revert.
   if (claim.status !== 1) {
     const label = claim.status === 2 ? "already approved" : claim.status === 3 ? "already rejected" : "not open"
     return NextResponse.json(
@@ -164,16 +214,46 @@ export async function POST(req: Request) {
     )
   }
 
-  // 6) Build evidence (typed signals from the client) + binding (chain state).
-  const nowSec = BigInt(Math.floor(Date.now() / 1000))
-  const issuedAgo = BigInt(parsed.evidence.issuedAtSecondsAgo ?? 3600)
-  const evidence: ClaimEvidence = {
+  // 7) REV-001: verify the evidence ATTESTATION. The caller must own this
+  //    claim (claimant or merchant) and must have signed every evidence field
+  //    plus the chain/contract/claim binding. Fail closed on any mismatch.
+  const att: EvidenceAttestation = {
+    chainId: APP_CHAIN.id,
+    verifier: contract,
+    coverageId: parsed.coverageId.toString(),
+    claimId: parsed.claimId.toString(),
+    evidenceHash: claim.evidenceHash as `0x${string}`,
     productMatches: parsed.evidence.productMatches,
     damageEligible: parsed.evidence.damageEligible,
     evidenceComplete: parsed.evidence.evidenceComplete,
     fileIntegrityOk: parsed.evidence.fileIntegrityOk,
-    issuedAt: nowSec - issuedAgo,
-    requestedAmount: BigInt(parsed.evidence.requestedAmountWei),
+    requestedAmountWei: parsed.evidence.requestedAmountWei,
+    issuedAt: parsed.evidence.issuedAt,
+    timestamp: parsed.timestamp,
+  }
+  try {
+    await verifyEvidenceAttestation(att, parsed.signature as `0x${string}`, {
+      chainId: APP_CHAIN.id,
+      verifier: contract,
+      onChainEvidenceHash: claim.evidenceHash as `0x${string}`,
+      authorized: [getAddress(claim.claimant), getAddress(coverage.merchant)],
+    })
+  } catch (e) {
+    if (e instanceof AttestationError) {
+      return NextResponse.json({ error: "attestation_invalid", message: e.message }, { status: 403 })
+    }
+    return NextResponse.json({ error: "attestation_invalid", message: "Attestation could not be verified." }, { status: 403 })
+  }
+
+  // 8) Build evidence (attested fields) + binding (chain state).
+  const nowSec = BigInt(Math.floor(Date.now() / 1000))
+  const evidence: ClaimEvidence = {
+    productMatches: att.productMatches,
+    damageEligible: att.damageEligible,
+    evidenceComplete: att.evidenceComplete,
+    fileIntegrityOk: att.fileIntegrityOk,
+    issuedAt: BigInt(att.issuedAt),
+    requestedAmount: BigInt(att.requestedAmountWei),
     evidenceHash: claim.evidenceHash,
   }
   const binding: DecisionBinding = {
@@ -189,11 +269,12 @@ export async function POST(req: Request) {
     decisionTtl: DECISION_TTL,
   }
 
-  // 7) Evaluate + sign. Policy may APPROVE or REJECT; both are signed decisions
+  // 9) Evaluate + sign. Policy may APPROVE or REJECT; both are signed decisions
   //    the contract verifies. evaluateAndSign only throws (no signature) on
   //    malformed output or an over-cap approval. When RESVYN_GROQ_KEY is set,
-  //    Groq is the brain (hard-signal gate first, safe fallback on any failure);
-  //    otherwise the deterministic policy is the brain.
+  //    Groq is the brain; REV-006: any Groq/provider failure FAILS CLOSED (the
+  //    brain throws and no signature is returned) instead of falling back to an
+  //    approval. Without a key the deterministic policy is the brain.
   try {
     const account = privateKeyToAccount(key)
     const { model, decision, signature, signer } = await evaluateAndSign(evidence, binding, account, {

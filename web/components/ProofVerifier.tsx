@@ -112,7 +112,10 @@ export default function ProofVerifier() {
   }, [])
 
   useEffect(() => {
-    verifyAll()
+    // Defer the initial verification so its synchronous setState calls do not
+    // run inside the effect body (react-hooks/set-state-in-effect).
+    const t = setTimeout(() => verifyAll(), 0)
+    return () => clearTimeout(t)
   }, [verifyAll])
 
   return (

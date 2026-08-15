@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   Cpu,
@@ -40,12 +40,15 @@ import StatusDot from "./StatusDot"
 import {
   APP_CHAIN,
   APP_CONTRACT_ADDRESS,
+  DEPLOY_START_BLOCK,
   PROOF,
   explorerTx,
   isAppContractReady,
+  isOperationalDeployment,
   warrantyReserveAbi,
 } from "@/lib/chain"
 import { formatBOT, parseBOT, shortAddr } from "@/lib/format"
+import { attestationMessage } from "@/lib/evaluateAuth"
 
 type Tone = "ok" | "idle" | "pending" | "warn" | "fail"
 type ActionKey = "deposit" | "issue" | "open" | "evaluate" | "resolve" | "withdraw" | "probe"
@@ -104,7 +107,7 @@ type SignedDecision = {
 }
 
 const ZERO_TX: TxState = { status: "idle" }
-const COVERAGE_STATUS = ["None", "Active"] as const
+const COVERAGE_STATUS = ["None", "Active", "Expired"] as const
 const CLAIM_STATUS = ["None", "Open", "Approved", "Rejected"] as const
 
 const inputStyle: React.CSSProperties = {
@@ -189,7 +192,11 @@ export default function AppConsole() {
   })
 
   const onAppChain = chainId === APP_CHAIN.id
-  const canWrite = Boolean(isConnected && onAppChain && deployed && contract && address)
+  // REV-002: writes are enabled only for a manifest-verified operational
+  // deployment. The default archived proof instance is strictly read-only:
+  // no deposit, issuance, claim, settlement, or withdrawal against it.
+  const operational = isOperationalDeployment(APP_CONTRACT_ADDRESS)
+  const canWrite = Boolean(operational && isConnected && onAppChain && deployed && contract && address)
 
   const [reserve, setReserve] = useState({ balance: 0n, locked: 0n, free: 0n })
   const [evaluator, setEvaluator] = useState<Address | null>(null)
@@ -229,9 +236,15 @@ export default function AppConsole() {
   const [signed, setSigned] = useState<SignedDecision | null>(null)
   const [noWallet, setNoWallet] = useState(false)
   const [instance, setInstance] = useState({ balance: 0n, locked: 0n, free: 0n, nonceUsed: false })
+  // REV-009: last observed counts, used to skip unchanged per-record re-reads.
+  const lastCounts = useRef({ cov: -1n, claim: -1n })
 
   useEffect(() => {
-    if (address && !claimant) setClaimant(address)
+    if (address && !claimant) {
+      // Defer so the state write is not synchronous inside the effect.
+      const t = setTimeout(() => setClaimant(address), 0)
+      return () => clearTimeout(t)
+    }
   }, [address, claimant])
 
   const pushLog = useCallback((entry: Omit<LogEntry, "id">) => {
@@ -266,68 +279,80 @@ export default function AppConsole() {
         nonceUsed: Boolean(nonceUsed),
       })
 
-      const lastCov = Number(covCount > 12n ? 12n : covCount)
-      const covRows: CoverageRow[] = []
-      for (let i = 0; i < lastCov; i++) {
-        const id = covCount - BigInt(i)
-        const [cov, boundClaim] = await Promise.all([
-          publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "coverageOf", args: [id] }),
-          publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "claimIdOfCoverage", args: [id] }),
-        ])
-        covRows.push({
-          id,
-          merchant: cov.merchant,
-          claimant: cov.claimant,
-          maxPayout: cov.maxPayout,
-          expiry: cov.expiry,
-          status: Number(cov.status),
-          claimId: boundClaim,
-        })
-      }
-      setCoverages(covRows)
+      // REV-009: skip the per-record re-reads and the historical log scan when
+      // the coverage/claim counts have not changed since the last refresh.
+      // This keeps refresh cost bounded by what changed, not by total history.
+      const countsUnchanged =
+        lastCounts.current.cov === covCount && lastCounts.current.claim === claimCount
+      if (!countsUnchanged) {
+        lastCounts.current = { cov: covCount, claim: claimCount }
 
-      const lastClaim = Number(claimCount > 12n ? 12n : claimCount)
-      const claimRows: ClaimRow[] = []
-      for (let i = 0; i < lastClaim; i++) {
-        const id = claimCount - BigInt(i)
-        const claim = await publicClient.readContract({
-          address: contract,
-          abi: warrantyReserveAbi,
-          functionName: "claimOf",
-          args: [id],
-        })
-        claimRows.push({
-          id,
-          coverageId: claim.coverageId,
-          claimant: claim.claimant,
-          evidenceHash: claim.evidenceHash,
-          paidAmount: claim.paidAmount,
-          status: Number(claim.status),
-        })
-      }
-      setClaims(claimRows)
-
-      try {
-        const raw = await publicClient.getLogs({ address: contract, fromBlock: 0n, toBlock: "latest" })
-        const decoded = parseEventLogs({ abi: warrantyReserveAbi, logs: raw })
-        const fromChain: LogEntry[] = decoded
-          .slice(-20)
-          .reverse()
-          .map((ev, idx) => ({
-            id: `chain-${ev.transactionHash}-${idx}`,
-            event: ev.eventName,
-            detail: summarizeEvent(ev.eventName, ev.args as Record<string, unknown>),
-            tone: ev.eventName.startsWith("Claim") && ev.eventName.endsWith("Rejected") ? "fail" : "ok",
-            hash: ev.transactionHash,
-          }))
-        if (fromChain.length) {
-          setLog((prev) => {
-            const seen = new Set(fromChain.map((e) => e.id))
-            return [...fromChain, ...prev.filter((e) => !seen.has(e.id))].slice(0, 40)
+        const lastCov = Number(covCount > 12n ? 12n : covCount)
+        const covRows: CoverageRow[] = []
+        for (let i = 0; i < lastCov; i++) {
+          const id = covCount - BigInt(i)
+          const [cov, boundClaim] = await Promise.all([
+            publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "coverageOf", args: [id] }),
+            publicClient.readContract({ address: contract, abi: warrantyReserveAbi, functionName: "claimIdOfCoverage", args: [id] }),
+          ])
+          covRows.push({
+            id,
+            merchant: cov.merchant,
+            claimant: cov.claimant,
+            maxPayout: cov.maxPayout,
+            expiry: cov.expiry,
+            status: Number(cov.status),
+            claimId: boundClaim,
           })
         }
-      } catch {
-        /* historical logs are optional; session log still works */
+        setCoverages(covRows)
+
+        const lastClaim = Number(claimCount > 12n ? 12n : claimCount)
+        const claimRows: ClaimRow[] = []
+        for (let i = 0; i < lastClaim; i++) {
+          const id = claimCount - BigInt(i)
+          const claim = await publicClient.readContract({
+            address: contract,
+            abi: warrantyReserveAbi,
+            functionName: "claimOf",
+            args: [id],
+          })
+          claimRows.push({
+            id,
+            coverageId: claim.coverageId,
+            claimant: claim.claimant,
+            evidenceHash: claim.evidenceHash,
+            paidAmount: claim.paidAmount,
+            status: Number(claim.status),
+          })
+        }
+        setClaims(claimRows)
+
+        // REV-009: bound the historical log scan to this deployment's start
+        // block instead of rescanning the whole chain from block 0. Only the
+        // most recent events are needed for the session log.
+        try {
+          const raw = await publicClient.getLogs({ address: contract, fromBlock: DEPLOY_START_BLOCK, toBlock: "latest" })
+          const decoded = parseEventLogs({ abi: warrantyReserveAbi, logs: raw })
+          const fromChain: LogEntry[] = decoded
+            .slice(-20)
+            .reverse()
+            .map((ev, idx) => ({
+              id: `chain-${ev.transactionHash}-${idx}`,
+              event: ev.eventName,
+              detail: summarizeEvent(ev.eventName, ev.args as Record<string, unknown>),
+              tone: ev.eventName.startsWith("Claim") && ev.eventName.endsWith("Rejected") ? "fail" : "ok",
+              hash: ev.transactionHash,
+            }))
+          if (fromChain.length) {
+            setLog((prev) => {
+              const seen = new Set(fromChain.map((e) => e.id))
+              return [...fromChain, ...prev.filter((e) => !seen.has(e.id))].slice(0, 40)
+            })
+          }
+        } catch {
+          /* historical logs are optional; session log still works */
+        }
       }
     } catch (err) {
       setReadError(describeError(err))
@@ -337,7 +362,10 @@ export default function AppConsole() {
   }, [publicClient, contract, deployed, address])
 
   useEffect(() => {
-    void refresh()
+    // Defer the first refresh so its synchronous setReading(true) does not
+    // run inside the effect body (react-hooks/set-state-in-effect).
+    const t = setTimeout(() => void refresh(), 0)
+    return () => clearTimeout(t)
   }, [refresh])
 
   async function addAppChain() {
@@ -498,7 +526,11 @@ export default function AppConsole() {
   }
 
   async function onEvaluate() {
-    setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
+    if (!walletClient || !address) {
+      setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to attest evidence and evaluate." })
+      return
+    }
+    setAction("evaluate", { status: "pending", message: "Waiting for your evidence signature…" })
     setSigned(null)
     try {
       let requested: bigint
@@ -508,6 +540,33 @@ export default function AppConsole() {
         setAction("evaluate", { status: "failed", message: err instanceof Error ? err.message : "Enter a valid amount in BOT." })
         return
       }
+      if (requested === 0n) {
+        setAction("evaluate", { status: "failed", message: "Requested amount must be greater than zero." })
+        return
+      }
+      // REV-001: the evidence hash the claim was opened with. The contract
+      // binds the claim to this hash, so the signed attestation must name the
+      // exact same hash or the server refuses.
+      const evidenceHash = hashText(evidenceNote)
+      const timestamp = Math.floor(Date.now() / 1000)
+      const att = {
+        chainId: APP_CHAIN.id,
+        verifier: contract as Address,
+        coverageId: evalCoverageId,
+        claimId: evalClaimId,
+        evidenceHash,
+        productMatches: signals.productMatches,
+        damageEligible: signals.damageEligible,
+        evidenceComplete: signals.evidenceComplete,
+        fileIntegrityOk: signals.fileIntegrityOk,
+        requestedAmountWei: requested.toString(),
+        issuedAt: timestamp - 3600,
+        timestamp,
+      }
+      // The claimant or merchant attests the evidence under their own key; the
+      // server recovers the signer and checks it against on-chain state.
+      const signature = await walletClient.signMessage({ message: attestationMessage(att) })
+      setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
       const res = await fetch("/api/evaluate", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -520,7 +579,11 @@ export default function AppConsole() {
             evidenceComplete: signals.evidenceComplete,
             fileIntegrityOk: signals.fileIntegrityOk,
             requestedAmountWei: requested.toString(),
+            issuedAt: att.issuedAt,
           },
+          signer: address,
+          signature,
+          timestamp,
         }),
       })
       const body = await res.json()
@@ -655,6 +718,15 @@ export default function AppConsole() {
   }
 
   const gate = useMemo(() => {
+    // REV-002: the archived proof instance is read-only, whatever the wallet.
+    if (deployed && !operational) {
+      return {
+        tone: "warn" as Tone,
+        title: "This is the archived proof instance (read-only)",
+        body:
+          "The configured contract is the recorded Mainnet proof deployment, whose evaluator signer is no longer in use. Deposit, issuance, claim, settlement, and withdrawal are disabled so no real BOT can be locked without a working settlement path. Verify the proof on /proof. Point NEXT_PUBLIC_RESVYN_ADDRESS at a verified operational deployment and set NEXT_PUBLIC_RESVYN_OPERATIONAL=1 to enable writes.",
+      }
+    }
     if (!deployed) {
       return {
         tone: "warn" as Tone,
@@ -677,7 +749,7 @@ export default function AppConsole() {
       }
     }
     return null
-  }, [deployed, isConnected, onAppChain, chainId])
+  }, [deployed, isConnected, onAppChain, chainId, operational])
 
   const busy = Object.values(txs).some((t) => t.status === "pending") || connecting || switching
 
@@ -847,61 +919,138 @@ export default function AppConsole() {
             </div>
           </ActionCard>
 
-          <div className="card" style={{ padding: 22 }}>
-            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <span
+          {operational ? (
+            <div className="card" style={{ padding: 22 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    width: 38,
+                    height: 38,
+                    borderRadius: 11,
+                    background: "var(--color-inset)",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flex: "none",
+                  }}
+                >
+                  <Cpu size={18} color="var(--color-forest)" />
+                </span>
+                <div>
+                  <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
+                  <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
+                    Only the claim claimant or coverage merchant can evaluate: you sign the evidence
+                    fields with your wallet, the server verifies the signature against on-chain
+                    ownership, runs the bounded policy, and returns a signed decision to relay.
+                  </p>
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Coverage id" htmlFor="eval-coverage-id">
+                  <input id="eval-coverage-id" style={inputStyle} value={evalCoverageId} onChange={(e) => setEvalCoverageId(e.target.value)} inputMode="numeric" placeholder="1" />
+                </Field>
+                <Field label="Claim id" htmlFor="eval-claim-id">
+                  <input id="eval-claim-id" style={inputStyle} value={evalClaimId} onChange={(e) => setEvalClaimId(e.target.value)} inputMode="numeric" placeholder="1" />
+                </Field>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Requested amount (BOT)" htmlFor="requested-amt">
+                  <input id="requested-amt" style={inputStyle} value={requestedAmt} onChange={(e) => setRequestedAmt(e.target.value)} inputMode="decimal" placeholder="0.001" />
+                </Field>
+                <Field label="Evidence note (must match the claim)" htmlFor="evidence-note-eval">
+                  <input id="evidence-note-eval" style={inputStyle} value={evidenceNote} onChange={(e) => setEvidenceNote(e.target.value)} placeholder="Damage photos and receipt" />
+                </Field>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 12 }}>
+                {(
+                  [
+                    ["productMatches", "Product matches"],
+                    ["damageEligible", "Damage eligible"],
+                    ["evidenceComplete", "Evidence complete"],
+                    ["fileIntegrityOk", "File integrity ok"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.82rem", color: "var(--color-muted)" }}>
+                    <input
+                      type="checkbox"
+                      checked={signals[key]}
+                      onChange={(e) => setSignals((s) => ({ ...s, [key]: e.target.checked }))}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+                <button className="btn btn-primary" onClick={() => void onEvaluate()} disabled={!canWrite || busy} style={{ padding: "0.6rem 1rem" }}>
+                  {txs.evaluate.status === "pending" ? <Loader2 size={15} /> : null}
+                  Evaluate (sign evidence)
+                </button>
+                <button className="btn btn-ghost" onClick={() => void onResolve()} disabled={!canWrite || busy || !signed} style={{ padding: "0.6rem 1rem" }}>
+                  {txs.resolve.status === "pending" ? <Loader2 size={15} /> : null}
+                  Resolve with decision
+                </button>
+                {signed && <DecisionCard signed={signed} />}
+              </div>
+              <TxLine tx={txs.evaluate} />
+              <TxLine tx={txs.resolve} />
+            </div>
+          ) : (
+            <div className="card" style={{ padding: 22 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    width: 38,
+                    height: 38,
+                    borderRadius: 11,
+                    background: "var(--color-inset)",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flex: "none",
+                  }}
+                >
+                  <Cpu size={18} color="var(--color-forest)" />
+                </span>
+                <div>
+                  <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
+                  <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
+                    Live read of claim #1 on BOT Chain Mainnet. This instance already settled. A new claim cannot be paid here because the evaluator signer was bound at deploy and is no longer in use.
+                  </p>
+                </div>
+              </div>
+              <dl
                 style={{
-                  display: "inline-flex",
-                  width: 38,
-                  height: 38,
-                  borderRadius: 11,
-                  background: "var(--color-inset)",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  flex: "none",
+                  margin: "16px 0 0",
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr",
+                  columnGap: 16,
+                  rowGap: 10,
+                  fontSize: "0.95rem",
                 }}
               >
-                <Cpu size={18} color="var(--color-forest)" />
-              </span>
-              <div>
-                <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
-                <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
-                  Live read of claim #1 on BOT Chain Mainnet. This instance already settled. A new claim cannot be paid here because the evaluator signer was bound at deploy and is no longer in use.
-                </p>
-              </div>
+                {(
+                  [
+                    ["Coverage id", "1"],
+                    ["Claim id", "1"],
+                    ["Paid", "0.001 BOT"],
+                    ["Status", liveClaimLabel(claims)],
+                    ["Nonce 1", instance.nonceUsed ? "Used" : "Open"],
+                    ["Product matches", "Yes"],
+                    ["Damage eligible", "Yes"],
+                    ["Evidence complete", "Yes"],
+                  ] as const
+                ).map(([k, v]) => (
+                  <div key={k} style={{ display: "contents" }}>
+                    <dt style={{ color: "var(--color-muted)" }}>{k}</dt>
+                    <dd style={{ margin: 0, fontWeight: 600, textAlign: "right" }}>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+              <a href="/proof" className="btn btn-primary" style={{ marginTop: 16 }}>
+                Verify this payout live
+              </a>
             </div>
-            <dl
-              style={{
-                margin: "16px 0 0",
-                display: "grid",
-                gridTemplateColumns: "auto 1fr",
-                columnGap: 16,
-                rowGap: 10,
-                fontSize: "0.95rem",
-              }}
-            >
-              {(
-                [
-                  ["Coverage id", "1"],
-                  ["Claim id", "1"],
-                  ["Paid", "0.001 BOT"],
-                  ["Status", liveClaimLabel(claims)],
-                  ["Nonce 1", instance.nonceUsed ? "Used" : "Open"],
-                  ["Product matches", "Yes"],
-                  ["Damage eligible", "Yes"],
-                  ["Evidence complete", "Yes"],
-                ] as const
-              ).map(([k, v]) => (
-                <div key={k} style={{ display: "contents" }}>
-                  <dt style={{ color: "var(--color-muted)" }}>{k}</dt>
-                  <dd style={{ margin: 0, fontWeight: 600, textAlign: "right" }}>{v}</dd>
-                </div>
-              ))}
-            </dl>
-            <a href="/proof" className="btn btn-primary" style={{ marginTop: 16 }}>
-              Verify this payout live
-            </a>
-          </div>
+          )}
 
           <ActionCard
             icon={Store}
@@ -1253,6 +1402,9 @@ function summarizeEvent(name: string, args: Record<string, unknown>): string {
   }
   if (name === "ClaimRejected") {
     return `claim #${String(args.claimId)} rejected`
+  }
+  if (name === "CoverageExpired") {
+    return `coverage #${String(args.coverageId)} expired · lock ${formatBOT(args.maxPayout as bigint)} released`
   }
   return Object.entries(args)
     .filter(([, v]) => v !== undefined)
