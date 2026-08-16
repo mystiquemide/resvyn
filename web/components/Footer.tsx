@@ -1,6 +1,6 @@
 import Link from "next/link"
 import { explorerAddress } from "@/lib/chain"
-import { PROOF } from "@/lib/chain"
+import { CURRENT_DEPLOYMENT, PROOF } from "@/lib/chain"
 
 export default function Footer() {
   return (
@@ -38,14 +38,15 @@ export default function Footer() {
                 { href: "/#how", label: "How it works" },
                 { href: "/demo", label: "Guided demo" },
                 { href: "/reserve", label: "Look up a reserve" },
-                { href: "/app", label: "Launch app" },
+                { href: "/app", label: "Inspect live app" },
               ]}
             />
             <FooterCol
-              title="Proof"
+              title="Mainnet"
               links={[
-                { href: "/proof", label: "Mainnet proof" },
-                { href: explorerAddress(677, PROOF.contract), label: "Contract on BOTScan", external: true },
+                { href: "/proof", label: "Verify Mainnet proof" },
+                { href: explorerAddress(677, CURRENT_DEPLOYMENT.contract), label: "Current WarrantyReserve", external: true },
+                { href: explorerAddress(677, PROOF.contract), label: "Recorded lifecycle contract", external: true },
                 { href: "https://github.com/mystiquemide/resvyn", label: "Source on GitHub", external: true },
               ]}
             />
@@ -63,8 +64,8 @@ export default function Footer() {
         <hr style={{ border: 0, height: 1, background: "color-mix(in srgb, var(--color-canvas) 16%, transparent)", margin: "40px 0 24px" }} />
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16, justifyContent: "space-between", alignItems: "center", fontSize: "0.82rem", color: "color-mix(in srgb, var(--color-canvas) 62%, transparent)" }}>
-          <span>© 2026 Resvyn · Proven on BOT Chain Mainnet, chain 677</span>
-          <span>Verifiable on BOT Chain Mainnet</span>
+          <span>© 2026 Resvyn · Live on BOT Chain Mainnet, chain 677</span>
+          <span>Current deployment + recorded lifecycle proof</span>
         </div>
       </div>
     </footer>
@@ -87,7 +88,7 @@ function FooterCol({
         {links.map((l) =>
           l.external ? (
             <li key={l.href}>
-              <a href={l.href} target="_blank" rel="noopener" style={footerLinkStyle}>
+              <a href={l.href} target="_blank" rel="noopener noreferrer" style={footerLinkStyle}>
                 {l.label}
               </a>
             </li>

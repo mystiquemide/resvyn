@@ -4,7 +4,7 @@ import { defineChain } from "viem"
  * Networks
  * ------------------------------------------------------------------ */
 
-/** BOT Chain Mainnet. Home of the recorded CP-011 proof and the live /app writes. */
+/** BOT Chain Mainnet. Home of the current deployment and recorded lifecycle proof. */
 export const botMainnet = defineChain({
   id: 677,
   name: "BOT Chain Mainnet",
@@ -228,6 +228,7 @@ export const warrantyReserveAbi = [
   { type: "error", name: "ClaimNotOpen", inputs: [] },
   { type: "error", name: "NotClaimant", inputs: [] },
   { type: "error", name: "ZeroDeposit", inputs: [] },
+  { type: "error", name: "ZeroWithdrawal", inputs: [] },
   { type: "error", name: "ZeroMaxPayout", inputs: [] },
   { type: "error", name: "InvalidClaimant", inputs: [] },
   { type: "error", name: "InvalidExpiry", inputs: [] },
@@ -248,26 +249,37 @@ export const warrantyReserveAbi = [
   { type: "error", name: "PayoutTransferFailed", inputs: [] },
 ] as const
 
-/* ------------------------------------------------------------------ *
- * CP-011: the recorded Mainnet proof (chain 677). Every value below was
- * fired and independently re-verified on chain. /proof re-reads it live.
- * ------------------------------------------------------------------ */
-
 export const MAINNET_CHAIN_ID = 677
 
-/** Live WarrantyReserve on Mainnet 677. Override with NEXT_PUBLIC_RESVYN_ADDRESS if needed. */
-export const APP_CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_RESVYN_ADDRESS ||
-  "0x414592d2313d233b673b1f97803c261355ccd996") as `0x${string}`
+/* ------------------------------------------------------------------ *
+ * Current hardened Mainnet deployment
+ * ------------------------------------------------------------------ */
+
+export const CURRENT_DEPLOYMENT = {
+  chainId: MAINNET_CHAIN_ID,
+  contract: "0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe" as `0x${string}`,
+  evaluator: "0xf1527ad9E09728A9ca0b9c8968E3f6297A9b97D0" as `0x${string}`,
+  deployTx: "0x600b3cd1dee4d87aa4845106673724630be60408b108348ad9c4c3b894e75a49" as `0x${string}`,
+  deploymentBlock: 19898630n,
+  smokeReserveWei: 1000000000000000n, // 0.001 BOT
+} as const
 
 /**
- * REV-009: first block the app ever needs to read from. The recorded proof
- * deployment happened at block 19219910 on chain 677; scanning from block 0
- * on every refresh is unbounded and redundant. Override with
- * NEXT_PUBLIC_DEPLOY_START_BLOCK when pointing at a different deployment.
+ * /app reads the current hardened Mainnet deployment by default. This does NOT
+ * enable writes: operational mode still requires the explicit evaluator pin +
+ * NEXT_PUBLIC_RESVYN_OPERATIONAL=1 deployment gate below.
  */
+export const APP_CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_RESVYN_ADDRESS ||
+  CURRENT_DEPLOYMENT.contract) as `0x${string}`
+
+/** First block /app needs to scan for the configured deployment's events. */
 export const DEPLOY_START_BLOCK = BigInt(
-  process.env.NEXT_PUBLIC_DEPLOY_START_BLOCK || "19219910",
+  process.env.NEXT_PUBLIC_DEPLOY_START_BLOCK || CURRENT_DEPLOYMENT.deploymentBlock.toString(),
 )
+
+/* ------------------------------------------------------------------ *
+ * Archived full-lifecycle Mainnet proof (CP-011)
+ * ------------------------------------------------------------------ */
 
 export const PROOF = {
   chainId: 677,
@@ -305,7 +317,7 @@ export const PROOF = {
     { key: "deposit", step: "Deposit reserve", who: "merchant", value: "0.005 BOT", block: 19219912n, gas: 45804n, event: "ReserveDeposited", hash: "0x9939c6babadba6caef5c5fd24847c2cc137f0e35372b4fbf7d5dd6ce93d8da32" },
     { key: "issue", step: "Issue coverage #1 (lock 0.001)", who: "merchant", value: "", block: 19219914n, gas: 207758n, event: "CoverageIssued", hash: "0xb3b558ca3b91574bf960c1b809675a16d03d35b6e1113bf6b10cb6c371ff3919" },
     { key: "openClaim", step: "Open claim #1", who: "buyer", value: "", block: 19219917n, gas: 165620n, event: "ClaimOpened", hash: "0x117848f679bca29d3ec5ce39ed3e246453b990accf419c8a61a02cc22735aa40" },
-    { key: "resolve", step: "Resolve: AI-signed approve and pay", who: "merchant", value: "0.001 BOT to buyer", block: 19219919n, gas: 117884n, event: "ClaimPaid", hash: "0x22fdef36c1213ce62ef58b6842e0209aa6e429677b089c23367ffabe5b72bb2d" },
+    { key: "resolve", step: "Resolve: evaluator-signed approve and pay", who: "merchant", value: "0.001 BOT to buyer", block: 19219919n, gas: 117884n, event: "ClaimPaid", hash: "0x22fdef36c1213ce62ef58b6842e0209aa6e429677b089c23367ffabe5b72bb2d" },
     { key: "withdraw", step: "Withdraw free reserve", who: "merchant", value: "0.004 BOT reclaimed", block: 19219923n, gas: 33990n, event: "ReserveWithdrawn", hash: "0x0a94e8fe5c9496b1d0a943886a33e00fd83ec9037ff76ef19e3da7422f07b01e" },
   ],
 } as const
@@ -317,14 +329,15 @@ export const MAINNET_RPC = "https://rpc.botchain.ai"
  * ------------------------------------------------------------------ */
 
 /**
- * The recorded Mainnet proof instance is ARCHIVED. Its evaluator signer is
- * immutable and documented as no longer in use, so no new funded position may
- * be created against it. Writes are enabled only for a fresh, manifest-verified
- * operational deployment:
- *   - NEXT_PUBLIC_RESVYN_ADDRESS must point at a NON-proof contract, AND
- *   - NEXT_PUBLIC_RESVYN_OPERATIONAL must be exactly "1" (the operator's
- *     explicit acknowledgement for that address).
- * Every other configuration renders the app read-only (REV-002).
+ * The recorded lifecycle proof instance is ARCHIVED. Its evaluator signer is
+ * immutable and no longer in operational use, so no new funded position may be
+ * created against it.
+ *
+ * Writes are enabled only for a non-proof, manifest-verified deployment when:
+ *   - NEXT_PUBLIC_RESVYN_OPERATIONAL is exactly "1", AND
+ *   - NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is pinned, AND
+ *   - AppConsole confirms the live on-chain signer matches that pin.
+ * Every other configuration renders the app read-only.
  */
 export const ARCHIVED_PROOF_ADDRESS = PROOF.contract
 
@@ -333,10 +346,6 @@ export function isArchivedProofInstance(addr: string): boolean {
 }
 
 export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): boolean {
-  // REV-002 round 3: an operational deployment requires the evaluator pin
-  // too. Without NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR the app is read-only,
-  // so no deposit/issuance can happen before evaluator compatibility is
-  // established.
   return (
     !isArchivedProofInstance(addr) &&
     process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL === "1" &&
@@ -345,21 +354,15 @@ export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): bo
 }
 
 /**
- * REV-002 round 2: the client-side half of the exact deployment gate. When
- * NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is set, the live contract's immutable
- * evaluatorSigner must match it or the app renders read-only. The server
- * enforces the authoritative check (on-chain signer vs RESVYN_EVALUATOR_KEY).
- *
- * REV-002 round 3: a pinned evaluator is REQUIRED for writes. Without
- * NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR this returns false, so deposits,
- * issuance, and claims stay disabled until the operator pins the expected
- * signer — a misconfigured deployment can no longer lock funds before
- * evaluator compatibility is established.
+ * Client-side evaluator manifest gate. The live contract signer must match the
+ * operator-pinned signer before write actions can become available. The server
+ * independently performs the authoritative on-chain signer vs
+ * RESVYN_EVALUATOR_KEY check before signing any settlement decision.
  */
 export const EXPECTED_EVALUATOR = process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR?.toLowerCase()
 
 export function evaluatorSignerMatches(expected: string | undefined, live: string | undefined): boolean {
-  if (!expected) return false // writes require a pinned evaluator manifest
-  if (!live) return false // cannot verify yet
+  if (!expected) return false
+  if (!live) return false
   return expected === live.toLowerCase()
 }

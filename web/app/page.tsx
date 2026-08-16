@@ -5,7 +5,7 @@ import Footer from "@/components/Footer"
 import ReserveMeter from "@/components/ReserveMeter"
 import NetworkBadge from "@/components/NetworkBadge"
 import { img, IMAGES } from "@/lib/images"
-import { PROOF, explorerTx, explorerAddress } from "@/lib/chain"
+import { CURRENT_DEPLOYMENT, PROOF, explorerTx, explorerAddress } from "@/lib/chain"
 import { shortAddr } from "@/lib/format"
 
 export default function LandingPage() {
@@ -27,7 +27,6 @@ export default function LandingPage() {
   )
 }
 
-/* ---- Hero -------------------------------------------------------------- */
 function Hero() {
   return (
     <section
@@ -59,9 +58,9 @@ function Hero() {
             <span className="em">backed by a real reserve.</span>
           </h1>
 
-          <p className="lead" style={{ marginTop: 20, maxWidth: 520 }}>
+          <p className="lead" style={{ marginTop: 20, maxWidth: 540 }}>
             Resvyn locks each coverage against a merchant-funded native BOT reserve.
-            A bounded AI decision settles claims, and every payout is provable on chain.
+            A bounded AI-assisted evaluator authorizes settlement, and every payout is provable on chain.
           </p>
 
           <div style={{ display: "flex", gap: 14, marginTop: 28, flexWrap: "wrap" }}>
@@ -78,7 +77,6 @@ function Hero() {
   )
 }
 
-/* ---- Problem ----------------------------------------------------------- */
 function Problem() {
   return (
     <section className="container-x" style={{ paddingBlock: "clamp(64px, 9vw, 116px)" }}>
@@ -96,7 +94,6 @@ function Problem() {
   )
 }
 
-/* ---- How it works ------------------------------------------------------ */
 function HowItWorks() {
   const steps = [
     {
@@ -163,7 +160,7 @@ function HowItWorks() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 10 }}>
             <h3 style={{ fontSize: "1.05rem", fontWeight: 600 }}>The reserve at a glance</h3>
             <Link href="/proof" className="link-teal" style={{ fontSize: "0.9rem" }}>
-              from the Mainnet proof
+              from the recorded Mainnet lifecycle
             </Link>
           </div>
           <div style={{ marginTop: 22, maxWidth: 620 }}>
@@ -179,7 +176,6 @@ function HowItWorks() {
   )
 }
 
-/* ---- Reserve, made visible --------------------------------------------- */
 function ReserveVisible() {
   return (
     <section className="container-x" style={{ paddingBlock: "clamp(64px, 9vw, 116px)" }}>
@@ -231,7 +227,6 @@ function ReserveVisible() {
   )
 }
 
-/* ---- AI checkpoint (dark band) ----------------------------------------- */
 function Checkpoint() {
   return (
     <section
@@ -252,7 +247,7 @@ function Checkpoint() {
           </h2>
           <p style={{ marginTop: 22, fontSize: "1.1rem", lineHeight: 1.6, color: "color-mix(in srgb, var(--color-canvas) 82%, transparent)" }}>
             The evaluator returns a decision bound to one exact claim and signs it with EIP-712.
-            The contract recovers the signer and pays only if it matches the key set at deployment.
+            An optional AI proposal sits behind deterministic policy and schema gates; the contract pays only when the final signed decision matches its immutable authority.
           </p>
         </div>
 
@@ -274,7 +269,6 @@ function Checkpoint() {
   )
 }
 
-/* ---- Who it's for ------------------------------------------------------ */
 function WhoFor() {
   return (
     <section className="container-x" style={{ paddingBlock: "clamp(64px, 9vw, 116px)" }}>
@@ -316,42 +310,52 @@ function WhoFor() {
   )
 }
 
-/* ---- Proof band -------------------------------------------------------- */
 function ProofBand() {
   const resolve = PROOF.txs.find((t) => t.key === "resolve")!
   return (
     <section style={{ background: "color-mix(in srgb, var(--color-inset) 55%, var(--color-canvas))", borderBlock: "1px solid var(--color-hairline)" }}>
       <div className="container-x" style={{ paddingBlock: "clamp(64px, 9vw, 116px)" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 40, alignItems: "center" }}>
-          <div>
-            <span className="kicker">Proven</span>
-            <h2 className="display" style={{ fontSize: "clamp(1.9rem, 4vw, 3rem)", marginTop: 18 }}>
-              Live on BOT Chain <span className="em">Mainnet.</span>
-            </h2>
-            <p className="lead" style={{ marginTop: 22 }}>
-              The full lifecycle ran on BOT Chain Mainnet in six settled transactions: fund, issue,
-              claim, an AI-signed payout, and a clean withdrawal. The reserve reconciled back to zero.
-            </p>
-            <div style={{ display: "flex", gap: 14, marginTop: 28, flexWrap: "wrap" }}>
-              <Link href="/proof" className="btn btn-primary">
-                Verify it yourself <ArrowRight size={17} />
-              </Link>
-              <a href={explorerAddress(677, PROOF.contract)} target="_blank" rel="noopener" className="btn btn-ghost">
-                Contract on BOTScan
-              </a>
-            </div>
+        <div style={{ maxWidth: 760 }}>
+          <span className="kicker">Mainnet evidence</span>
+          <h2 className="display" style={{ fontSize: "clamp(1.9rem, 4vw, 3rem)", marginTop: 18 }}>
+            Current deployment and <span className="em">recorded lifecycle proof.</span>
+          </h2>
+          <p className="lead" style={{ marginTop: 22 }}>
+            The hardened contract is live and source-verified now. A separate archived contract preserves the earlier six-transaction lifecycle so the complete reserve-to-payout flow remains independently checkable.
+          </p>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20, marginTop: 38, alignItems: "stretch" }}>
+          <div className="card" style={{ padding: 28 }}>
+            <NetworkBadge label="Current Mainnet deployment" sub="chain 677" />
+            <dl style={{ margin: "22px 0 0", display: "grid", gap: 0 }}>
+              <ProofRow k="Contract" v={shortAddr(CURRENT_DEPLOYMENT.contract)} href={explorerAddress(677, CURRENT_DEPLOYMENT.contract)} />
+              <ProofRow k="Evaluator" v={shortAddr(CURRENT_DEPLOYMENT.evaluator)} />
+              <ProofRow k="Deploy block" v={CURRENT_DEPLOYMENT.deploymentBlock.toString()} />
+              <ProofRow k="Smoke reserve" v="0.001 BOT" />
+              <ProofRow k="Source" v="Verified on BOTScan" href={`${explorerAddress(677, CURRENT_DEPLOYMENT.contract)}?tab=contract`} last />
+            </dl>
           </div>
 
           <div className="card" style={{ padding: 28 }}>
-            <NetworkBadge label="BOT Chain Mainnet" sub="chain 677" />
+            <NetworkBadge label="Recorded lifecycle proof" sub="archived · chain 677" />
             <dl style={{ margin: "22px 0 0", display: "grid", gap: 0 }}>
               <ProofRow k="Contract" v={shortAddr(PROOF.contract)} href={explorerAddress(677, PROOF.contract)} />
               <ProofRow k="Reserve funded" v={`${PROOF.deposited} BOT`} />
-              <ProofRow k="AI-signed payout" v={`${PROOF.paid} BOT to buyer`} href={explorerTx(677, resolve.hash)} />
+              <ProofRow k="Evaluator payout" v={`${PROOF.paid} BOT to buyer`} href={explorerTx(677, resolve.hash)} />
               <ProofRow k="Reserve reconciled" v="0 / 0 / 0" />
               <ProofRow k="Runtime on chain" v={`${PROOF.runtimeBytes.toLocaleString()} bytes`} last />
             </dl>
           </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 14, marginTop: 28, flexWrap: "wrap" }}>
+          <Link href="/proof" className="btn btn-primary">
+            Verify both deployments <ArrowRight size={17} />
+          </Link>
+          <a href={explorerAddress(677, CURRENT_DEPLOYMENT.contract)} target="_blank" rel="noopener" className="btn btn-ghost">
+            Current contract on BOTScan
+          </a>
         </div>
       </div>
     </section>
@@ -368,10 +372,11 @@ function ProofRow({ k, v, href, last }: { k: string; v: string; href?: string; l
         gap: 16,
         padding: "13px 0",
         borderBottom: last ? "none" : "1px solid var(--color-hairline)",
+        minWidth: 0,
       }}
     >
       <dt style={{ color: "var(--color-muted-2)", fontSize: "0.9rem" }}>{k}</dt>
-      <dd style={{ margin: 0, fontWeight: 500, fontSize: "0.95rem", textAlign: "right" }}>
+      <dd style={{ margin: 0, fontWeight: 500, fontSize: "0.95rem", textAlign: "right", minWidth: 0, overflowWrap: "anywhere" }}>
         {href ? (
           <a href={href} target="_blank" rel="noopener" className="link-teal">
             {v}
@@ -384,7 +389,6 @@ function ProofRow({ k, v, href, last }: { k: string; v: string; href?: string; l
   )
 }
 
-/* ---- Closing CTA ------------------------------------------------------- */
 function ClosingCta() {
   return (
     <section

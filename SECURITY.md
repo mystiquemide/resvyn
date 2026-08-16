@@ -2,9 +2,29 @@
 
 Resvyn is a pre-production protocol implementation. The contract and web
 application are heavily test-covered, but the system has not received an
-independent production audit. The recorded BOT Chain Mainnet proof deployment
-is archived and read-only. A separate operational deployment is required for
-new live coverage.
+independent production security audit. Do not place material value in a Resvyn
+deployment without a separate review and production-grade operational controls.
+
+## Current Mainnet status
+
+The current hardened `WarrantyReserve` is deployed and source-verified on BOT
+Chain Mainnet:
+
+- Contract: `0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe`
+- Immutable evaluator signer: `0xf1527ad9E09728A9ca0b9c8968E3f6297A9b97D0`
+- Deployment block: `19898630`
+- Deploy tx: `0x600b3cd1dee4d87aa4845106673724630be60408b108348ad9c4c3b894e75a49`
+- Source: verified on BOTScan
+
+The current contract contains a disposable `0.001 BOT` smoke reserve. The public
+app reads this deployment live but remains intentionally read-only until the
+operator satisfies every write-enable gate below.
+
+The earlier proof deployment at
+`0x414592d2313d233b673b1f97803c261355ccd996` is retained only as an archived,
+read-only full-lifecycle proof. Its original evaluator key is no longer an
+operational signing authority and the application refuses to sign decisions for
+that address.
 
 ## Reporting a vulnerability
 
@@ -21,8 +41,10 @@ The contract enforces these properties on chain:
 
 - Coverage cannot be issued unless the merchant has enough free reserve to
   cover its full declared maximum payout.
-- Product and receipt commitments must be non-zero at issuance.
+- Product and receipt commitments must be non-zero and cannot use the client's
+  empty-placeholder commitment.
 - A merchant can withdraw only reserve that is not locked behind coverage.
+- Zero-value deposits and withdrawals are rejected.
 - Only the buyer bound to a coverage can open its claim.
 - One coverage can create at most one claim.
 - A claim is bound to one evidence hash.
@@ -38,16 +60,26 @@ The contract enforces these properties on chain:
 
 ## Evaluator trust boundary
 
-`RESVYN_EVALUATOR_KEY` is a settlement authority. It belongs only in the server
-environment and must never be committed or shipped to the browser. If the key
-is compromised, an attacker can sign bounded decisions for open claims. If it
-is lost, an open claim can remain locked because the contract intentionally has
-no admin signer-rotation path.
+`RESVYN_EVALUATOR_KEY` is a settlement authority. It belongs only in a server
+secret store and must never be committed, logged, pasted into public tooling, or
+shipped to the browser.
+
+If the key is compromised, an attacker can sign bounded decisions for open
+claims. The contract still enforces the claim binding, payout cap and replay
+checks, but the signer is nevertheless privileged settlement authority.
+
+If the key is lost, an open claim can remain locked because the current contract
+intentionally has no admin signer-rotation path. Recovery requires migration to
+a new deployment. Back up the evaluator key using appropriate production secret
+management before enabling live coverage.
 
 For operational deployments, the server derives the evaluator address from the
 configured key and verifies it against the contract's immutable
-`evaluatorSigner`. The frontend also requires a pinned
-`NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR` before enabling writes.
+`evaluatorSigner`. A mismatch fails closed with no decision signature.
+
+The frontend independently requires a pinned
+`NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR`, reads the live on-chain signer, and
+keeps writes disabled unless the two match.
 
 ## Evidence model
 
@@ -61,18 +93,26 @@ issuance. Damage eligibility, evidence completeness and file-integrity flags
 remain attestations supplied by the authorized party.
 
 `POST /api/evaluate` accepts claim references and fresh authorization, not a
-second mutable copy of the evidence. Missing, stale, forged or cross-claim data
-fails closed without an evaluator signature.
+second mutable copy of the evidence. Missing, stale, forged, cross-claim or
+misbound data fails closed without an evaluator signature.
 
 If the optional Groq decision layer is enabled, provider timeout, HTTP failure,
 malformed output or schema failure also fails closed. Provider failure never
 silently becomes approval.
+
+The chain proves that settlement was authorized by the deployment's immutable
+evaluator signer. It does not independently prove which off-chain model produced
+the proposed decision.
 
 ## Evidence persistence
 
 Evidence records are first-write-wins, claim-bound and persisted before an API
 success is returned. The default store is a local file configured through
 `RESVYN_EVIDENCE_STORE_PATH`.
+
+The implementation writes the new state before acknowledging intake. If loading
+or persistence fails, the store is treated as unavailable and the evaluator
+signs nothing.
 
 An operational host therefore needs durable writable storage. Multi-instance
 hosting must use shared storage or replace the local adapter with a shared data
@@ -89,23 +129,59 @@ identity is trusted only when `RESVYN_TRUST_PROXY=1` is explicitly configured.
 The current limiter is process-local, so horizontally scaled production hosting
 needs a shared rate-limit backend.
 
-## Deployment requirements
+## Write-enable deployment gate
 
-Before enabling writes on a new deployment:
+A valid contract address alone is never enough to enable transactions.
 
-1. Deploy the current contract to BOT Chain Mainnet.
+Before enabling writes on the current or any future deployment:
+
+1. Deploy the intended contract to BOT Chain Mainnet.
 2. Verify the source on BOTScan.
-3. Confirm the immutable evaluator signer matches the server key.
-4. Pin the same signer in `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR`.
-5. Set `NEXT_PUBLIC_RESVYN_OPERATIONAL=1` only after those checks pass.
-6. Use durable evidence storage and a production secret manager.
-7. Run the full CI suite and a live end-to-end rehearsal with a small reserve.
+3. Confirm the immutable on-chain evaluator signer.
+4. Set `NEXT_PUBLIC_RESVYN_ADDRESS` to that exact deployment.
+5. Set `NEXT_PUBLIC_DEPLOY_START_BLOCK` to that deployment block.
+6. Pin the immutable signer in `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR`.
+7. Provision the matching server-only `RESVYN_EVALUATOR_KEY`.
+8. Provision durable writable evidence storage with
+   `RESVYN_EVIDENCE_STORE_PATH` or a replacement shared adapter.
+9. Confirm the server-derived signer equals the live contract signer.
+10. Run the full CI suite and a disposable end-to-end Mainnet rehearsal.
+11. Only then set `NEXT_PUBLIC_RESVYN_OPERATIONAL=1`.
+
+The client checks the public deployment manifest and live signer before exposing
+write actions. The evaluator server performs its own authoritative signer check
+before producing any settlement signature. If any gate is absent or mismatched,
+the system remains read-only or fails closed.
+
+## Key handling
+
+- Never commit deployer or evaluator private keys.
+- Never place private keys in `NEXT_PUBLIC_*` variables.
+- Never reuse a key that has been exposed in chat, logs, screenshots, terminal
+  history, CI output or another untrusted surface.
+- Use dedicated deployment and evaluator identities rather than a valuable
+  personal wallet.
+- Keep production evaluator backups encrypted and access-controlled.
+- Rotate to a new deployment if the immutable evaluator key is lost or
+  compromised.
 
 ## Release gates
 
 CI compiles and tests the contracts, checks evaluator parity, lints and type
 checks the web app, runs unit and route-integration tests, creates a production
-build and audits production web dependencies.
+build, checks tracked files for common secret signatures and audits production
+web dependencies.
 
 Any contract or evaluator-signing change should receive the same full suite and
 a fresh Mainnet deployment review before it is considered operational.
+
+## Known limitations
+
+- No independent production audit has been completed.
+- The evaluator signer is immutable and has no emergency rotation path.
+- Physical-world damage remains attested unless an external inspection/oracle
+  adapter is added.
+- The default evidence persistence adapter is designed for one durable host.
+- The current rate limiter is process-local.
+- The current public frontend is intentionally read-only until the evaluator
+  and durable persistence release gates are satisfied.
