@@ -4,6 +4,12 @@ import { fileURLToPath } from "node:url"
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 
+// Cross-origin evaluator API (NEXT_PUBLIC_RESVYN_API_BASE) must be allowed
+// by the CSP connect-src when the frontend and API are hosted separately.
+const apiBase = (process.env.NEXT_PUBLIC_RESVYN_API_BASE || "").replace(/\/+$/, "")
+const connectSrc = ["'self'", "https://rpc.botchain.ai"]
+if (apiBase) connectSrc.push(apiBase)
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   turbopack: { root: dir },
@@ -32,7 +38,7 @@ const nextConfig: NextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob: https://images.unsplash.com",
               "font-src 'self' data:",
-              "connect-src 'self' https://rpc.botchain.ai",
+              "connect-src " + connectSrc.join(" "),
               "frame-ancestors 'none'",
               "base-uri 'self'",
               "form-action 'self'",
