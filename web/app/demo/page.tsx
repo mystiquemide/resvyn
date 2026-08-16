@@ -6,7 +6,7 @@ import StatusDot from "@/components/StatusDot"
 import DemoWalkthrough from "@/components/DemoWalkthrough"
 
 export const metadata: Metadata = {
-  title: "Demo · Resvyn",
+  title: "Resvyn · Demo",
   description:
     "A simulated, step-by-step walkthrough of the Resvyn warranty-reserve lifecycle. Every amount mirrors the real Mainnet proof run, but nothing here touches a chain.",
 }

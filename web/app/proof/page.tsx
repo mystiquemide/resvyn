@@ -6,7 +6,7 @@ import { PROOF, explorerAddress } from "@/lib/chain"
 import { shortHash } from "@/lib/format"
 
 export const metadata: Metadata = {
-  title: "Mainnet proof · Resvyn",
+  title: "Resvyn · Mainnet proof",
   description:
     "The Resvyn warranty reserve, deployed and settled on BOT Chain Mainnet (chain 677). Every value on this page is read live from the chain in your browser and reconciled against the recorded proof.",
 }

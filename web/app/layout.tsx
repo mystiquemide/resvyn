@@ -16,10 +16,11 @@ const inter = Inter({
 })
 
 // The public origin for social metadata. Set NEXT_PUBLIC_SITE_URL at deploy
-// (for example https://resvyn.app) so og:image and link previews resolve to a
-// real host. The default matches the intended domain; a deploy without this
-// var inherits the default.
-const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://resvyn.app").replace(/\/+$/, "")
+// (for example https://resvyn.vercel.app) so og:image and link previews
+// resolve to a real host. The default is the live production URL; a deploy
+// without this var inherits the default. (resvyn.app is not resolvable and
+// must not be used.)
+const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://resvyn.vercel.app").replace(/\/+$/, "")
 
 export const metadata: Metadata = {
   title: "Resvyn · Verifiable warranty reserves",

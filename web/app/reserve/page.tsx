@@ -4,7 +4,7 @@ import Footer from "@/components/Footer"
 import ReserveLookup from "@/components/ReserveLookup"
 
 export const metadata: Metadata = {
-  title: "Look up a reserve · Resvyn",
+  title: "Resvyn · Reserve",
   description:
     "Paste a merchant address and read their Resvyn reserve live from BOT Chain Mainnet. No wallet required.",
 }

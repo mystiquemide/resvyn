@@ -13,11 +13,13 @@ export default function ReserveMeter({
   lockedWei,
   freeWei,
   caption,
+  emptyLabel = "No reserve funded yet.",
 }: {
   balanceWei: bigint
   lockedWei: bigint
   freeWei: bigint
   caption?: string
+  emptyLabel?: string
 }) {
   const total = balanceWei > 0n ? balanceWei : 0n
   const lockedPct = total > 0n ? Number((lockedWei * 10000n) / total) / 100 : 0
@@ -75,7 +77,7 @@ export default function ReserveMeter({
 
       {empty && (
         <p style={{ marginTop: 12, fontSize: "0.85rem", color: "var(--color-muted-2)" }}>
-          No reserve funded yet.
+          {emptyLabel}
         </p>
       )}
       {caption && (
