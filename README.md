@@ -182,25 +182,25 @@ Resvyn is a warranty-reserve primitive rather than an insurance-underwriting or 
 
 ## Architecture
 
-```text
-Merchant / buyer wallet
-        │
-        ├── deposit / issue / open / resolve / withdraw
-        ▼
-BOT Chain Mainnet · chain 677
-WarrantyReserve.sol
-        ▲
-        │ EIP-712 settlement decision
-        │
-VPS evaluator API · HTTPS
-        ▲
-        │ authorized, claim-bound evidence
-        │
-Deterministic policy ── optional Groq proposal
-        │
-Durable evidence store · atomic, fail-closed
+```mermaid
+flowchart TB
+    W["Merchant / buyer wallet"]
+    UI["Vercel frontend"]
+    WR["WarrantyReserve.sol<br/>BOT Chain Mainnet · chain 677"]
+    API["VPS evaluator API<br/>HTTPS"]
+    POLICY["Deterministic policy<br/>Optional Groq proposal"]
+    STORE["Durable evidence store<br/>Atomic · fail-closed"]
 
-Vercel frontend ── HTTPS ──► VPS evaluator API
+    W --> UI
+    UI -->|Deposit · issue · open · resolve · withdraw| WR
+    UI -->|Authorized claim-bound evidence| API
+    API -->|Persist / read evidence| STORE
+    STORE -->|Durable evidence record| API
+    API -->|Read live coverage · claim · evaluator signer| WR
+    API --> POLICY
+    POLICY --> API
+    API -->|Signed EIP-712 settlement decision| UI
+    WR -->|Public state · events · receipts| UI
 ```
 
 Important implementation paths:
