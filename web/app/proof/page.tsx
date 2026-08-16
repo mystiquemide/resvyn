@@ -2,120 +2,86 @@ import type { Metadata } from "next"
 import Link from "next/link"
 import Nav from "@/components/Nav"
 import Footer from "@/components/Footer"
-import ProofVerifier from "@/components/ProofVerifier"
+import CurrentProofVerifier from "@/components/CurrentProofVerifier"
 import { CURRENT_DEPLOYMENT, PROOF, explorerAddress, explorerTx } from "@/lib/chain"
+import { CURRENT_PROOF } from "@/lib/currentProof"
 import { shortHash } from "@/lib/format"
 
 export const metadata: Metadata = {
   title: "Resvyn · Mainnet proof",
   description:
-    "Verify Resvyn's current BOT Chain Mainnet deployment and the archived full-lifecycle proof directly against chain 677.",
+    "Verify Resvyn's complete current BOT Chain Mainnet lifecycle: funded reserve, buyer-bound coverage, durable evidence, evaluator-authorized payout, and reserve reconciliation.",
 }
 
 export default function ProofPage() {
   const currentContractUrl = explorerAddress(677, CURRENT_DEPLOYMENT.contract)
-  const proofContractUrl = explorerAddress(677, PROOF.contract)
+  const archivedContractUrl = explorerAddress(677, PROOF.contract)
+  const resolve = CURRENT_PROOF.txs.find((tx) => tx.key === "resolve")!
 
   return (
     <>
       <Nav />
       <main id="main" className="container-x" style={{ paddingBlock: "clamp(36px, 5vw, 60px)" }}>
-        <header style={{ maxWidth: 860 }}>
-          <span className="kicker">Mainnet proof</span>
+        <header style={{ maxWidth: 900 }}>
+          <span className="kicker">Current Mainnet proof</span>
           <h1 className="display" style={{ fontSize: "clamp(2rem, 4.6vw, 3rem)", marginTop: 14 }}>
-            Two deployments, <span className="em">one verifiable story.</span>
+            The production contract completed <span className="em">the full warranty lifecycle.</span>
           </h1>
           <p className="lead" style={{ marginTop: 16 }}>
-            Resvyn’s current hardened contract is live and source-verified on BOT Chain Mainnet. The earlier proof instance is preserved separately
-            because it contains a complete disposable warranty lifecycle: reserve funding, coverage, claim, evaluator-authorized payout, and reserve
-            reconciliation. The proof verifier below reads that recorded lifecycle directly from chain 677.
+            This is the hardened Resvyn deployment that the live app uses today. A fresh merchant funded a native BOT reserve, issued buyer-bound coverage to a separate buyer, the buyer opened an evidence-bound claim, the durable VPS evaluator authorized a real payout, and the merchant reserve reconciled back to zero.
           </p>
-
-          <div
-            className="pill"
-            style={{
-              marginTop: 18,
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-              color: "var(--color-teal-ink)",
-              background: "color-mix(in srgb, var(--color-teal) 12%, #fff)",
-              borderColor: "color-mix(in srgb, var(--color-teal) 30%, transparent)",
-              fontSize: "0.82rem",
-            }}
-          >
-            invariant: no funded reserve and no valid coverage
+          <div className="pill" style={{ marginTop: 18, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", color: "var(--color-teal-ink)", background: "color-mix(in srgb, var(--color-teal) 12%, #fff)", borderColor: "color-mix(in srgb, var(--color-teal) 30%, transparent)", fontSize: "0.82rem" }}>
+            no funded reserve and no valid coverage
           </div>
         </header>
 
-        <section style={{ marginTop: 30 }} aria-labelledby="current-deployment-title">
-          <div className="card" style={{ padding: "22px 24px", maxWidth: 900 }}>
+        <section style={{ marginTop: 30 }} aria-labelledby="primary-proof-title">
+          <div className="card" style={{ padding: "22px 24px", maxWidth: 980 }}>
             <div style={{ display: "flex", gap: 18, justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" }}>
               <div style={{ minWidth: 0 }}>
-                <span className="kicker" style={{ color: "var(--color-teal-ink)" }}>Current deployment</span>
-                <h2 id="current-deployment-title" style={{ margin: "8px 0 0", fontFamily: "var(--font-display)", fontSize: "1.4rem", fontWeight: 500 }}>
-                  Hardened WarrantyReserve
+                <span className="kicker" style={{ color: "var(--color-teal-ink)" }}>Primary proof · current deployment</span>
+                <h2 id="primary-proof-title" style={{ margin: "8px 0 0", fontFamily: "var(--font-display)", fontSize: "1.4rem", fontWeight: 500 }}>
+                  Hardened WarrantyReserve · chain 677
                 </h2>
-                <p style={{ margin: "8px 0 0", color: "var(--color-muted)", lineHeight: 1.55, maxWidth: 680 }}>
-                  Source verified on BOTScan. The public app reads this contract live. A disposable 0.001 BOT smoke reserve is present; writes stay
-                  fail-closed until the evaluator manifest and operational flag are deliberately enabled.
+                <p style={{ margin: "8px 0 0", color: "var(--color-muted)", lineHeight: 1.55, maxWidth: 730 }}>
+                  Source verified on BOTScan and operational in production. The proof below re-reads the current contract, the five lifecycle receipts, the consumed settlement nonce, and the durable evidence record instead of relying on screenshots.
                 </p>
               </div>
               <Link href="/app" className="btn btn-primary" style={{ flex: "none" }}>
-                Inspect live app
+                Open live app
               </Link>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginTop: 20, minWidth: 0 }}>
-              <DeploymentFact
-                label="Contract"
-                value={shortHash(CURRENT_DEPLOYMENT.contract)}
-                href={currentContractUrl}
-              />
-              <DeploymentFact
-                label="Evaluator signer"
-                value={shortHash(CURRENT_DEPLOYMENT.evaluator)}
-              />
-              <DeploymentFact
-                label="Deploy block"
-                value={CURRENT_DEPLOYMENT.deploymentBlock.toString()}
-              />
-              <DeploymentFact
-                label="Deploy transaction"
-                value={shortHash(CURRENT_DEPLOYMENT.deployTx)}
-                href={explorerTx(677, CURRENT_DEPLOYMENT.deployTx)}
-              />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 16, marginTop: 20, minWidth: 0 }}>
+              <DeploymentFact label="Contract" value={shortHash(CURRENT_PROOF.contract)} href={currentContractUrl} />
+              <DeploymentFact label="Merchant" value={shortHash(CURRENT_PROOF.merchant)} />
+              <DeploymentFact label="Buyer" value={shortHash(CURRENT_PROOF.buyer)} />
+              <DeploymentFact label="Evaluator" value={shortHash(CURRENT_PROOF.evaluator)} />
+              <DeploymentFact label="Claim payout" value="0.0005 BOT" href={explorerTx(677, resolve.hash)} />
+              <DeploymentFact label="Final merchant reserve" value="0 / 0 / 0" />
             </div>
           </div>
         </section>
 
-        <section style={{ marginTop: 42 }} aria-labelledby="recorded-proof-title">
-          <span className="kicker">Recorded lifecycle proof</span>
-          <h2 id="recorded-proof-title" style={{ margin: "8px 0 0", fontFamily: "var(--font-display)", fontSize: "clamp(1.55rem, 3.2vw, 2.05rem)", fontWeight: 500 }}>
-            Archived contract, full lifecycle receipts
-          </h2>
-          <p style={{ color: "var(--color-muted)", margin: "10px 0 0", maxWidth: 780, lineHeight: 1.55 }}>
-            This instance is intentionally read-only. Every state card and receipt below is re-read from BOT Chain Mainnet rather than treated as a
-            screenshot or local log.
-          </p>
+        <CurrentProofVerifier />
 
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 28px", marginTop: 16, fontSize: "0.88rem" }}>
-            <Meta label="Network" value="BOT Chain Mainnet" />
-            <Meta label="Chain ID" value="677" />
-            <div>
-              <span style={{ color: "var(--color-muted)" }}>Archived contract </span>
-              <a className="mono link-teal" href={proofContractUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: "0.85rem" }}>
-                {shortHash(PROOF.contract)}
-              </a>
-            </div>
-            <div>
-              <span style={{ color: "var(--color-muted)" }}>Recorded source </span>
-              <a className="link-teal" href={`${proofContractUrl}?tab=contract`} target="_blank" rel="noopener noreferrer">
-                BOTScan
-              </a>
+        <section style={{ marginTop: 56 }} aria-labelledby="historical-proof-title">
+          <div className="card" style={{ padding: "22px 24px", maxWidth: 980 }}>
+            <span className="kicker">Historical proof</span>
+            <h2 id="historical-proof-title" style={{ margin: "8px 0 0", fontFamily: "var(--font-display)", fontSize: "clamp(1.4rem, 3vw, 1.8rem)", fontWeight: 500 }}>
+              Earlier Mainnet lifecycle retained as an archive
+            </h2>
+            <p style={{ color: "var(--color-muted)", margin: "10px 0 0", maxWidth: 790, lineHeight: 1.55 }}>
+              Resvyn also preserves the earlier disposable lifecycle at a separate contract. It remains useful historical evidence, but it is no longer the primary proof and is never treated as the current operational deployment.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginTop: 20 }}>
+              <DeploymentFact label="Archived contract" value={shortHash(PROOF.contract)} href={archivedContractUrl} />
+              <DeploymentFact label="Archived evaluator" value={shortHash(PROOF.evaluator)} />
+              <DeploymentFact label="Archived payout" value="0.001 BOT" href={explorerTx(677, PROOF.txs.find((tx) => tx.key === "resolve")!.hash)} />
+              <DeploymentFact label="Archived final reserve" value="0 / 0 / 0" />
             </div>
           </div>
         </section>
-
-        <ProofVerifier />
       </main>
       <Footer />
     </>
@@ -133,15 +99,6 @@ function DeploymentFact({ label, value, href }: { label: string; value: string; 
       ) : (
         <div className="mono" style={{ marginTop: 6, overflowWrap: "anywhere" }}>{value}</div>
       )}
-    </div>
-  )
-}
-
-function Meta({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <span style={{ color: "var(--color-muted)" }}>{label} </span>
-      <span style={{ color: "var(--color-ink)", fontWeight: 600 }}>{value}</span>
     </div>
   )
 }
