@@ -1230,7 +1230,9 @@ export default function AppConsole() {
                 <div>
                   <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
                   <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
-                    Live read of claim #1 on BOT Chain Mainnet. This instance already settled. A new claim cannot be paid here because the evaluator signer was bound at deploy and is no longer in use.
+                    {archived
+                      ? "Live read of claim #1 on BOT Chain Mainnet. This instance already settled. A new claim cannot be paid here because the evaluator signer was bound at deploy and is no longer in use."
+                      : "Live read of the selected claim on BOT Chain Mainnet. Settlement requires an evaluator-signed decision bound to this claim, coverage, and evidence hash."}
                   </p>
                 </div>
               </div>
