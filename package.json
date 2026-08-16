@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Resvyn - merchant-funded warranty reserve on BOT Chain. No funded reserve, no valid coverage.",
+  "description": "Resvyn - RWA warranty reserve infrastructure on BOT Chain. No funded reserve, no valid coverage.",
   "scripts": {
     "compile": "hardhat compile",
+    "deploy:mainnet": "npm run compile && node --import tsx scripts/deploy-operational.ts",
     "test": "hardhat test",
     "test:contracts": "hardhat test",
     "test:invariants": "hardhat test nodejs",
