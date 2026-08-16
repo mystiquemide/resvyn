@@ -6,6 +6,7 @@ import ReserveMeter from "@/components/ReserveMeter"
 import NetworkBadge from "@/components/NetworkBadge"
 import { img, IMAGES } from "@/lib/images"
 import { CURRENT_DEPLOYMENT, PROOF, explorerTx, explorerAddress } from "@/lib/chain"
+import { CURRENT_PROOF } from "@/lib/currentProof"
 import { shortAddr } from "@/lib/format"
 
 export default function LandingPage() {
@@ -160,14 +161,14 @@ function HowItWorks() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 10 }}>
             <h3 style={{ fontSize: "1.05rem", fontWeight: 600 }}>The reserve at a glance</h3>
             <Link href="/proof" className="link-teal" style={{ fontSize: "0.9rem" }}>
-              from the recorded Mainnet lifecycle
+              from the current Mainnet lifecycle
             </Link>
           </div>
           <div style={{ marginTop: 22, maxWidth: 620 }}>
             <ReserveMeter
-              balanceWei={5000000000000000n}
-              lockedWei={1000000000000000n}
-              freeWei={4000000000000000n}
+              balanceWei={1000000000000000n}
+              lockedWei={500000000000000n}
+              freeWei={500000000000000n}
             />
           </div>
         </div>
@@ -311,47 +312,49 @@ function WhoFor() {
 }
 
 function ProofBand() {
-  const resolve = PROOF.txs.find((t) => t.key === "resolve")!
+  const currentResolve = CURRENT_PROOF.txs.find((t) => t.key === "resolve")!
+  const archivedResolve = PROOF.txs.find((t) => t.key === "resolve")!
+
   return (
     <section style={{ background: "color-mix(in srgb, var(--color-inset) 55%, var(--color-canvas))", borderBlock: "1px solid var(--color-hairline)" }}>
       <div className="container-x" style={{ paddingBlock: "clamp(64px, 9vw, 116px)" }}>
-        <div style={{ maxWidth: 760 }}>
+        <div style={{ maxWidth: 780 }}>
           <span className="kicker">Mainnet evidence</span>
           <h2 className="display" style={{ fontSize: "clamp(1.9rem, 4vw, 3rem)", marginTop: 18 }}>
-            Current deployment and <span className="em">recorded lifecycle proof.</span>
+            Current deployment, <span className="em">full lifecycle verified.</span>
           </h2>
           <p className="lead" style={{ marginTop: 22 }}>
-            The hardened contract is live and source-verified now. A separate archived contract preserves the earlier six-transaction lifecycle so the complete reserve-to-payout flow remains independently checkable.
+            The same hardened contract used by the production app has now completed the entire flow with a fresh merchant and separate buyer: reserve funding, buyer-bound coverage, durable evidence, evaluator-authorized payout, and reserve reconciliation.
           </p>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20, marginTop: 38, alignItems: "stretch" }}>
           <div className="card" style={{ padding: 28 }}>
-            <NetworkBadge label="Current Mainnet deployment" sub="chain 677" />
+            <NetworkBadge label="Current full lifecycle" sub="primary proof · chain 677" />
             <dl style={{ margin: "22px 0 0", display: "grid", gap: 0 }}>
               <ProofRow k="Contract" v={shortAddr(CURRENT_DEPLOYMENT.contract)} href={explorerAddress(677, CURRENT_DEPLOYMENT.contract)} />
-              <ProofRow k="Evaluator" v={shortAddr(CURRENT_DEPLOYMENT.evaluator)} />
-              <ProofRow k="Deploy block" v={CURRENT_DEPLOYMENT.deploymentBlock.toString()} />
-              <ProofRow k="Smoke reserve" v="0.001 BOT" />
-              <ProofRow k="Source" v="Verified on BOTScan" href={`${explorerAddress(677, CURRENT_DEPLOYMENT.contract)}?tab=contract`} last />
+              <ProofRow k="Reserve funded" v="0.001 BOT" />
+              <ProofRow k="Buyer payout" v="0.0005 BOT" href={explorerTx(677, currentResolve.hash)} />
+              <ProofRow k="Fresh merchant final reserve" v="0 / 0 / 0" />
+              <ProofRow k="Evaluator" v={shortAddr(CURRENT_PROOF.evaluator)} last />
             </dl>
           </div>
 
           <div className="card" style={{ padding: 28 }}>
-            <NetworkBadge label="Recorded lifecycle proof" sub="archived · chain 677" />
+            <NetworkBadge label="Historical lifecycle" sub="archived · chain 677" />
             <dl style={{ margin: "22px 0 0", display: "grid", gap: 0 }}>
               <ProofRow k="Contract" v={shortAddr(PROOF.contract)} href={explorerAddress(677, PROOF.contract)} />
-              <ProofRow k="Reserve funded" v={`${PROOF.deposited} BOT`} />
-              <ProofRow k="Evaluator payout" v={`${PROOF.paid} BOT to buyer`} href={explorerTx(677, resolve.hash)} />
-              <ProofRow k="Reserve reconciled" v="0 / 0 / 0" />
-              <ProofRow k="Runtime on chain" v={`${PROOF.runtimeBytes.toLocaleString()} bytes`} last />
+              <ProofRow k="Historical reserve" v={`${PROOF.deposited} BOT`} />
+              <ProofRow k="Historical payout" v={`${PROOF.paid} BOT`} href={explorerTx(677, archivedResolve.hash)} />
+              <ProofRow k="Final reserve" v="0 / 0 / 0" />
+              <ProofRow k="Status" v="Read-only archive" last />
             </dl>
           </div>
         </div>
 
         <div style={{ display: "flex", gap: 14, marginTop: 28, flexWrap: "wrap" }}>
           <Link href="/proof" className="btn btn-primary">
-            Verify both deployments <ArrowRight size={17} />
+            Verify current lifecycle <ArrowRight size={17} />
           </Link>
           <a href={explorerAddress(677, CURRENT_DEPLOYMENT.contract)} target="_blank" rel="noopener" className="btn btn-ghost">
             Current contract on BOTScan
