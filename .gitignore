@@ -1,53 +1,39 @@
-# Node modules
+# Dependencies
 /node_modules
+/web/node_modules
 
-# Compilation output
+# Build output
 /dist
-
-# Hardhat build artifacts
 /artifacts
-
-# Hardhat v2 cache support directory
 /cache
-
-# Typechain output
 /types
+/coverage
+/web/.next
+/web/out
+/web/tsconfig.tsbuildinfo
+/.gas-snapshot
+/snapshots
 
-# Environment files (secrets never committed)
+# Environment and credentials
 .env
 .env.*
 !.env.example
 
-# Hardhat coverage reports
-/coverage
-
-# Next.js frontend output
-/web/node_modules
-/web/.next
-/web/out
-/web/tsconfig.tsbuildinfo
-
-# Runtime evidence store (durable, operator-owned; never committed)
+# Runtime state
 /web/data
-
-# Gas snapshot files
-/.gas-snapshot
-
-# Snapshot cheatcodes output
-/snapshots
 
 # Logs
 *.log
 
-# Internal execution docs (kept local, not pushed to the public repo)
+# Local project operations and review artifacts
 /PROJECT_PLAN.MD
 /PROJECT_STATE.MD
 /FUNDING.md
 /GAS_SUPPORT_APPLICATION.md
 /MAINNET_PROOF_RUNBOOK.md
 /PROOF_SHEET.md
-
-# Local-only note files (explicit names only; tracked Markdown is welcome,
-# REV-014)
+/CODE_REVIEW.md
+/REV_FIXES.md
+/verify-groq-brain.mts
 /scratchpad.md
 /notes.md
