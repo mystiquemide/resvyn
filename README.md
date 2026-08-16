@@ -2,82 +2,47 @@
 
 **Fund the warranty before you issue it.**
 
-Resvyn is RWA warranty-reserve infrastructure on BOT Chain. A merchant deposits native BOT, issues buyer-bound coverage for a real purchase, and the contract locks the full maximum payout before that warranty becomes valid. If the buyer later opens a claim, authorized evidence enters a bounded evaluator and the contract verifies the signed settlement before releasing funds.
+Resvyn is warranty-reserve infrastructure on BOT Chain. A merchant deposits native BOT, issues buyer-bound coverage for a real purchase, and the contract locks the full maximum payout before the warranty becomes valid.
+
+If the buyer later opens a claim, authorized evidence enters a bounded evaluator. The resulting EIP-712 decision is verified by the contract before any payout is released.
 
 > **No funded reserve, no valid coverage.**
 
-Built for the **BOT Chain Builder Challenge #2 · AI × RWA Builder Challenge**, with RWA infrastructure as the primary product lane and AI used inside the claim-settlement mechanism.
-
-## Judge quick start
+## Live product
 
 - **Production:** https://resvyn.vercel.app
-- **Live Mainnet app:** https://resvyn.vercel.app/app
-- **Current Mainnet proof:** https://resvyn.vercel.app/proof
-- **Guided product demo:** https://resvyn.vercel.app/demo
+- **App:** https://resvyn.vercel.app/app
+- **Mainnet proof:** https://resvyn.vercel.app/proof
+- **Guided demo:** https://resvyn.vercel.app/demo
 - **Reserve lookup:** https://resvyn.vercel.app/reserve
-- **Current WarrantyReserve:** [`0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe`](https://scan.botchain.ai/address/0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe)
+- **WarrantyReserve:** [`0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe`](https://scan.botchain.ai/address/0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe)
 
-For the fastest evaluation, open the product, understand the reserve invariant, then open `/proof`. The proof page independently re-reads the current BOT Chain Mainnet deployment and its completed lifecycle receipts instead of relying on screenshots or mocked balances.
+The production app runs against BOT Chain Mainnet, chain ID `677`, and the proof route re-reads the current deployment and lifecycle receipts from chain instead of relying on screenshots or mocked balances.
 
-## What problem does Resvyn solve?
+## The problem
 
-A warranty is a financial promise attached to a real-world product, but the buyer normally cannot verify whether the merchant has actually reserved money to honor that promise.
+A warranty is a financial promise attached to a real-world product, but the buyer normally has no way to verify that the merchant has actually reserved money to honor it.
 
-Resvyn turns that promise into a **pre-funded, buyer-verifiable liability**:
+Resvyn turns that promise into a **pre-funded, buyer-verifiable liability**.
 
-1. the merchant deposits native BOT;
-2. coverage is issued to a specific buyer with product and receipt commitments;
-3. the full maximum payout is locked immediately;
-4. the buyer can open one evidence-bound claim;
-5. authorized evidence enters bounded evaluation;
-6. the evaluator signs an EIP-712 decision tied to that exact claim and deployment;
-7. the contract pays the buyer or releases the locked reserve; and
-8. the final reserve state and settlement receipts remain publicly auditable.
+The merchant funds a reserve first. When coverage is issued, the full maximum payout is locked immediately. Those funds cannot be withdrawn or reused while they back an active warranty obligation.
 
-The same reserve cannot be withdrawn or reused while it backs an active warranty obligation.
+## How it works
 
-## Why this fits AI × RWA
+1. **Fund reserve** — the merchant deposits native BOT.
+2. **Issue coverage** — coverage is bound to a buyer, product commitment, receipt commitment, maximum payout, and expiry.
+3. **Lock exposure** — the contract immediately locks the full maximum payout.
+4. **Open claim** — the buyer commits a canonical evidence hash on chain.
+5. **Attest evidence** — authorized evidence is stored durably and bound to that claim.
+6. **Evaluate** — the evaluator applies bounded policy and signs an EIP-712 settlement decision.
+7. **Settle** — approval pays the buyer; rejection releases the lock.
+8. **Reconcile** — released free reserve remains withdrawable by the merchant.
 
-### RWA mechanism
+Every financial state transition remains inspectable on BOT Chain.
 
-Resvyn does not tokenize the physical product. It puts the **financial obligation created by the real-world sale** on chain.
+## Current Mainnet deployment
 
-The contract records and enforces:
-
-- the merchant that issued the warranty;
-- the buyer that owns the claim right;
-- product and receipt commitments;
-- maximum financial exposure;
-- coverage expiry;
-- reserve locked behind the promise; and
-- the terminal settlement outcome.
-
-This makes the warranty liability visible, collateralized, and auditable while the product itself remains off chain.
-
-### AI role
-
-AI participates inside settlement, not as a chatbot or decorative wrapper.
-
-The production evaluator can use a Groq-backed model to propose a structured claim decision. That proposal must pass deterministic schema and policy checks before the server can sign anything. The final EIP-712 payload is bound to the chain, verifier contract, claim, coverage, claimant, evidence hash, amount, result, model version, expiry, and nonce.
-
-Provider errors, malformed output, missing evidence, signer mismatch, stale authorization, or persistence failure all fail closed without a settlement signature.
-
-The chain proves that the immutable evaluator authorized the settlement. It does not claim to prove which off-chain model produced the proposal.
-
-## Submission evidence
-
-| Review surface | Verifiable evidence |
-| --- | --- |
-| **Product completion** | Production app, merchant/buyer workflow, durable evidence service, completed Mainnet deposit → coverage → claim → evaluation → payout → reconciliation lifecycle |
-| **BOT Chain Mainnet integration** | Native BOT reserve accounting, chain `677`, source-verified contract, EIP-712 settlement bound to the deployed verifier, five current Mainnet receipts |
-| **RWA value** | A real warranty liability becomes pre-funded and buyer-verifiable before coverage is valid |
-| **AI integration** | Bounded model proposal inside the claim decision path, followed by deterministic gates and immutable evaluator authorization |
-| **UX** | Landing page, operational app, guided demo, public reserve lookup, and independent proof route |
-| **Technical quality** | Contract invariants, replay protection, payout caps, reentrancy protection, fail-closed evidence/evaluator paths, parity tests, CI and dependency audits |
-
-## Current BOT Chain Mainnet deployment
-
-The hardened `WarrantyReserve` is deployed, source-verified, and has completed a real end-to-end lifecycle.
+The current `WarrantyReserve` is deployed, source-verified, and has completed a full end-to-end lifecycle.
 
 - **Contract:** [`0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe`](https://scan.botchain.ai/address/0x96829b22ae7e59ac0f7d2ca6c50d017b51954ffe)
 - **Immutable evaluator:** `0xf1527ad9E09728A9ca0b9c8968E3f6297A9b97D0`
@@ -86,11 +51,11 @@ The hardened `WarrantyReserve` is deployed, source-verified, and has completed a
 - **Source:** BOTScan verified, Solidity `0.8.28+commit.7893614a`, optimizer disabled
 - **Evaluator/evidence backend:** durable VPS service over HTTPS
 
-A separate `0.001 BOT` smoke reserve exists under another merchant account from deployment verification. It is not part of the fresh lifecycle accounting below.
+A separate `0.001 BOT` smoke reserve remains under another merchant account from deployment verification. It is not part of the lifecycle accounting below.
 
-## Current full Mainnet lifecycle proof
+## Full Mainnet lifecycle proof
 
-This is Resvyn's primary proof and uses the **same contract as the production app**.
+The primary proof uses the same contract as the live app, with a fresh merchant and a separate buyer.
 
 ### Parties and claim
 
@@ -127,39 +92,69 @@ The buyer received exactly `0.0005 BOT`, moving from `0.00268422 BOT` to `0.0031
 
 ### Evidence and evaluator proof
 
-The current lifecycle used the production evidence path rather than a local fixture:
+The lifecycle used the production evidence path rather than a local fixture:
 
 1. the buyer committed the canonical evidence hash on chain;
 2. authenticated evidence intake stored the claim-bound record;
 3. the evidence record survived an evaluator-service restart;
 4. the evaluator read the live claim and durable evidence;
-5. the bounded model proposal passed policy/schema gates;
+5. the bounded model proposal passed policy and schema gates;
 6. the server signed the final EIP-712 decision; and
 7. the recovered signer matched the contract's immutable evaluator.
 
-The `/proof` route re-fetches the current contract state and all five lifecycle receipts from BOT Chain RPC. It also checks the durable evidence record through the production API.
+The `/proof` route re-fetches the current contract state and all five receipts from BOT Chain RPC. It also checks the durable evidence record through the production API.
 
 ### Negative proofs
 
-- **Replay resistance:** the already-consumed settlement nonce cannot be reused. Replay was rejected with `NonceAlreadyUsed`.
-- **Reserve solvency:** issuance above the merchant's free reserve was rejected with `InsufficientFreeReserve`; no state changed and no funds moved.
+- **Replay resistance:** replaying the consumed settlement nonce is rejected with `NonceAlreadyUsed`.
+- **Reserve solvency:** issuance above the merchant's free reserve is rejected with `InsufficientFreeReserve`.
 
-## Why BOT Chain is required
+Both checks were performed without moving additional funds.
 
-BOT Chain is the reserve and settlement layer, not a network badge attached to an otherwise off-chain product.
+## Why the warranty obligation is on chain
+
+Resvyn does not tokenize the physical product. It puts the **financial obligation created by the sale** on chain.
+
+The contract records and enforces:
+
+- who issued the warranty;
+- who owns the claim right;
+- product and receipt commitments;
+- maximum financial exposure;
+- expiry;
+- reserve locked behind the promise; and
+- the terminal settlement outcome.
+
+This keeps the real-world product off chain while making the warranty liability visible, collateralized, and auditable.
+
+## Why BOT Chain
+
+BOT Chain is the reserve and settlement layer.
 
 - merchant reserves are native BOT held by `WarrantyReserve`;
 - coverage locks and free-reserve accounting live on Mainnet;
 - claims and settlement receipts are publicly inspectable;
 - the app connects wallets directly to BOT Chain Mainnet;
-- the evaluator decision is bound to chain `677` and the exact verifier contract; and
-- settlement cannot be replayed onto another chain or another Resvyn deployment.
+- evaluator decisions are bound to chain `677` and the exact verifier contract; and
+- a valid settlement cannot be replayed onto another chain or another Resvyn deployment.
 
-Without BOT Chain, the core buyer guarantee — that a visible reserve is already locked behind the warranty — does not exist.
+Without the chain-level reserve, the buyer cannot independently verify that funds are already locked behind the warranty.
+
+## Claim evaluation
+
+The evaluator sits inside the settlement path behind deterministic checks.
+
+A Groq-backed model can propose a structured claim decision. The server then validates the output against policy and schema, binds it to the live on-chain claim, and signs only when the deployment, evidence, claimant, amount, nonce, and evaluator authority all match.
+
+The signed EIP-712 payload includes the chain, verifier, claim, coverage, claimant, evidence hash, amount, result, model version, expiry, and nonce.
+
+Provider errors, malformed output, missing evidence, signer mismatch, stale authorization, or persistence failure fail closed without a settlement signature.
+
+The chain proves that the immutable evaluator authorized the settlement. It does not independently prove which off-chain model produced the proposal.
 
 ## Contract invariants
 
-`contracts/WarrantyReserve.sol` enforces the financial core on chain:
+`contracts/WarrantyReserve.sol` enforces the financial core:
 
 - zero-value deposits and withdrawals are rejected;
 - coverage requires a real claimant, non-zero purchase commitments, non-zero payout cap, and future expiry;
@@ -175,62 +170,68 @@ Without BOT Chain, the core buyer guarantee — that a visible reserve is alread
 - settlement updates accounting before the external payout and is reentrancy guarded; and
 - unused expired coverage releases its lock exactly once.
 
-## Evidence, authenticity, and real-world scope
+## Evidence and real-world scope
 
-The claimant or merchant attests one evidence snapshot. The server verifies that its canonical hash equals the on-chain `evidenceHash`, verifies the signer is authorized, and derives product/receipt matches against the commitments made when coverage was issued.
+The claimant or merchant attests one evidence snapshot. The server verifies that its canonical hash equals the claim's on-chain `evidenceHash`, verifies that the signer is authorized, and derives product and receipt matches against the commitments made when coverage was issued.
 
-Damage eligibility and evidence completeness remain real-world attestations unless an external inspection or oracle adapter is added. Resvyn therefore proves **funding, authorization, cryptographic binding, reserve solvency, and policy enforcement**. It does not overclaim independent physical-world truth.
+Damage eligibility and evidence completeness remain real-world attestations unless an external inspection or oracle source is connected.
 
-Resvyn is a warranty-reserve primitive rather than an insurance-underwriting or identity system. Merchants remain responsible for their warranty terms and applicable consumer/compliance obligations. Higher-value deployments can attach identity, inspection, or oracle adapters without changing the core reserve invariant.
+Resvyn therefore proves **funding, authorization, cryptographic binding, reserve solvency, and policy enforcement**. It does not claim to independently prove physical-world damage.
+
+Resvyn is a warranty-reserve primitive rather than an insurance-underwriting or identity system. Merchants remain responsible for their warranty terms and applicable consumer obligations. Higher-value deployments can attach identity, inspection, or oracle adapters without changing the reserve model.
 
 ## Architecture
 
-```text
-Merchant / buyer wallet
-        │
-        ├── deposit / issue / open / resolve / withdraw
-        ▼
-BOT Chain Mainnet · chain 677
-WarrantyReserve.sol
-        ▲
-        │ EIP-712 bounded settlement decision
-        │
-VPS evaluator API · HTTPS
-        ▲
-        │ authorized, claim-bound evidence
-        │
-Deterministic policy ── optional Groq proposal
-        │
-Durable evidence store · atomic, fail-closed
+```mermaid
+flowchart TB
+    W["Merchant / buyer wallet"]
+    UI["Vercel frontend"]
+    WR["WarrantyReserve.sol<br/>BOT Chain Mainnet · chain 677"]
+    API["VPS evaluator API<br/>HTTPS"]
+    POLICY["Deterministic policy<br/>Optional Groq proposal"]
+    STORE["Durable evidence store<br/>Atomic · fail-closed"]
 
-Vercel frontend ── HTTPS ──► VPS evaluator API
+    W --> UI
+    UI -->|Deposit · issue · open · resolve · withdraw| WR
+    UI -->|Authorized claim-bound evidence| API
+    API -->|Persist / read evidence| STORE
+    STORE -->|Durable evidence record| API
+    API -->|Read live coverage · claim · evaluator signer| WR
+    API --> POLICY
+    POLICY --> API
+    API -->|Signed EIP-712 settlement decision| UI
+    WR -->|Public state · events · receipts| UI
 ```
 
 Important implementation paths:
 
 - `contracts/WarrantyReserve.sol` — reserve, coverage, and settlement contract
-- `scripts/evaluator/` — evaluator policy/schema/signing implementation
+- `scripts/evaluator/` — evaluator policy, schema, and signing implementation
 - `parity/evaluator.parity.test.ts` — evaluator parity checks
 - `web/app/api/evidence/route.ts` — authenticated evidence intake
-- `web/app/api/evaluate/route.ts` — bounded signed-decision endpoint
-- `web/lib/evidenceStore.ts` — fail-closed durable evidence persistence
+- `web/app/api/evaluate/route.ts` — signed-decision endpoint
+- `web/lib/evidenceStore.ts` — durable fail-closed evidence persistence
 - `web/lib/evaluateAuth.ts` — canonical authorization messages and signer recovery
 - `web/components/AppConsole.tsx` — wallet workflow
 - `web/lib/currentProof.ts` — current lifecycle receipt manifest
 - `web/lib/currentProofEngine.ts` — live proof verification
 
-## Fail-closed operating model
+## Safety model
 
-The production write path is deliberately gated. The browser requires the intended Mainnet deployment and immutable evaluator to match before enabling writes, while the evaluator service independently verifies its signing authority and durable evidence before producing a settlement signature.
+The production write path is gated at both the client and evaluator layers.
 
-If those checks fail, the client becomes read-only or the evaluator refuses to sign. Exact deployment variables and operational procedures are documented in [`SECURITY.md`](SECURITY.md) and [`web/.env.example`](web/.env.example) so the main README can stay focused on the product and its proof.
+The browser verifies that it is connected to the intended Mainnet deployment and that the immutable evaluator matches the configured signer before enabling writes. The evaluator independently verifies its own signing authority and durable evidence before producing a settlement signature.
+
+If those checks fail, the client becomes read-only or the evaluator refuses to sign.
+
+Exact deployment variables and operational procedures live in [`SECURITY.md`](SECURITY.md) and [`web/.env.example`](web/.env.example).
 
 ## Product surfaces
 
-- `/` — problem, product, and RWA value proposition
-- `/app` — operational Mainnet reserve, coverage, claim, evidence, and settlement workflow
+- `/` — product overview and value proposition
+- `/app` — operational reserve, coverage, claim, evidence, and settlement workflow
 - `/demo` — guided lifecycle walkthrough
-- `/proof` — independent current Mainnet lifecycle verifier
+- `/proof` — independent Mainnet lifecycle verifier
 - `/reserve` — public reserve lookup
 - `/faq` — product and trust-model answers
 
@@ -269,18 +270,20 @@ npm run build
 npm audit --omit=dev
 ```
 
-Copy `web/.env.example` to `web/.env.local` for local configuration. Development configuration remains fail-closed by default.
+Copy `web/.env.example` to `web/.env.local` for local configuration. Development remains fail-closed by default.
 
 ## Historical proof
 
-An earlier disposable Mainnet lifecycle remains archived at [`0x414592d2313d233b673b1f97803c261355ccd996`](https://scan.botchain.ai/address/0x414592d2313d233b673b1f97803c261355ccd996). It is historical evidence only. The current production deployment and primary submission proof are both `0x96829b...54ffe`.
+An earlier disposable Mainnet lifecycle remains archived at [`0x414592d2313d233b673b1f97803c261355ccd996`](https://scan.botchain.ai/address/0x414592d2313d233b673b1f97803c261355ccd996).
+
+It is historical evidence only. The current production deployment and primary proof both use `0x96829b...54ffe`.
 
 ## Known limitations
 
-Resvyn is hackathon-stage software:
+Resvyn is early-stage software:
 
 - the evaluator signer is immutable, so signer loss requires migration to a new deployment;
-- physical-world damage is attested unless an external inspection/oracle source is connected;
+- physical-world damage is attested unless an external inspection or oracle source is connected;
 - the current evidence backend is durable single-host storage rather than a replicated database;
 - rate limiting is process-local; and
 - the contracts have not received an independent production security audit.
@@ -288,10 +291,10 @@ Resvyn is hackathon-stage software:
 ## Roadmap
 
 1. merchant checkout/API integration for warranty issuance directly from real sales;
-2. optional independent inspection/oracle adapters for higher-value claims;
+2. optional independent inspection and oracle adapters for higher-value claims;
 3. replicated evidence and rate-limit infrastructure for multi-instance hosting;
 4. evaluator-key migration design for production operations; and
-5. external contract/security review before material value is placed at risk.
+5. external contract and security review before material value is placed at risk.
 
 ## License
 
