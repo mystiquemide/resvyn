@@ -1,0 +1,33 @@
+name: Package web app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/package-web.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify web app
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm run build
+      - name: Package source for deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: resvyn-web
+          path: web
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
