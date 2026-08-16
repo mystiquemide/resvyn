@@ -937,15 +937,41 @@ export default function AppConsole() {
 
   const busy = Object.values(txs).some((t) => t.status === "pending") || connecting || switching
 
+  // REV-002: the archived proof instance is read-only; the headline must not
+  // invite writes the instance cannot perform. When the contract is the
+  // recorded proof deployment (or writes are otherwise gated), say "inspect"
+  // instead of "run".
+  const archived = deployed && isArchivedProofInstance(APP_CONTRACT_ADDRESS)
+  const headline = archived ? (
+    <>
+      Inspect the reserve lifecycle <span className="em">on Mainnet.</span>
+    </>
+  ) : (
+    <>
+      Run the reserve lifecycle <span className="em">on Mainnet.</span>
+    </>
+  )
+  const subcopy = archived ? (
+    <>
+      This is the recorded Mainnet proof instance, read-only: every value below is
+      read live from BOT Chain Mainnet, and the archived evaluator signer cannot
+      settle new claims. Writes require a verified operational deployment on chain 677.
+    </>
+  ) : (
+    <>
+      Fund a reserve, lock coverage, open a claim, and settle it with a bounded AI-signed decision.
+      Writes go to BOT Chain Mainnet. They spend native BOT and are real transactions on chain 677.
+    </>
+  )
+
   return (
     <section>
       <header style={{ maxWidth: 760 }}>
         <h1 className="display" style={{ fontSize: "clamp(2rem, 4.6vw, 3rem)", marginTop: 0 }}>
-          Run the reserve lifecycle <span className="em">on Mainnet.</span>
+          {headline}
         </h1>
         <p className="lead" style={{ marginTop: 16 }}>
-          Fund a reserve, lock coverage, open a claim, and settle it with a bounded AI-signed decision.
-          Writes go to BOT Chain Mainnet. They spend native BOT and are real transactions on chain 677.
+          {subcopy}
         </p>
       </header>
 
@@ -1006,7 +1032,7 @@ export default function AppConsole() {
           <AlertTriangle size={18} color={gate.tone === "warn" ? "#c98a1a" : "var(--color-muted-2)"} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 600 }}>{gate.title}</div>
-            <p style={{ margin: "6px 0 0", color: "var(--color-muted)", fontSize: "0.92rem", lineHeight: 1.55 }}>{gate.body}</p>
+            <p style={{ margin: "6px 0 0", color: "var(--color-muted)", fontSize: "0.92rem", lineHeight: 1.55, overflowWrap: "anywhere" }}>{gate.body}</p>
             {isConnected && !onAppChain && (
               <button className="btn btn-primary" style={{ marginTop: 14 }} onClick={() => void onSwitch()} disabled={switching}>
                 {switching ? "Switching…" : "Switch to BOT Chain Mainnet"}

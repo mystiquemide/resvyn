@@ -6,7 +6,7 @@ import StatusDot from "@/components/StatusDot"
 import DemoWalkthrough from "@/components/DemoWalkthrough"
 
 export const metadata: Metadata = {
-  title: "RWA Warranty Demo · Resvyn",
+  title: "Resvyn · Demo",
   description:
     "Walk through the Resvyn RWA warranty loop: merchant reserve, buyer-bound coverage, claim, bounded AI decision, payout and reserve reconciliation.",
 }

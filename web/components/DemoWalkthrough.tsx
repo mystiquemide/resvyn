@@ -269,7 +269,16 @@ export default function DemoWalkthrough() {
                 Simulated
               </span>
             </div>
-            <ReserveMeter balanceWei={state.balance} lockedWei={state.locked} freeWei={state.free} />
+            <ReserveMeter
+              balanceWei={state.balance}
+              lockedWei={state.locked}
+              freeWei={state.free}
+              emptyLabel={
+                done && state.withdrawn > 0n
+                  ? "Reserve fully reclaimed after settlement (0 / 0 / 0)."
+                  : "No reserve funded yet."
+              }
+            />
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 20 }}>
               <Chip label="Coverage" value={state.coverage ? "Active · #1" : "None"} tone={state.coverage ? "ok" : "idle"} />
@@ -437,7 +446,7 @@ function DecisionCard() {
     ["amount", "0.001 BOT"],
     ["claimId", "1"],
     ["coverageId", "1"],
-    ["modelVersion", "resvyn-eval-v1"],
+    ["modelVersion", "resvyn-groq-openai/gpt-oss-120b"],
     ["nonce", "1"],
     ["signature", "0x9c4e…3f21 (simulated)"],
   ]

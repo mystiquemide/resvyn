@@ -353,7 +353,9 @@ function ProofStyles() {
         padding:13px 16px; background:#fff; border:1px solid var(--color-hairline); border-radius:13px;
         box-shadow:0 1px 2px rgba(4,37,25,0.04); }
       .proof-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(248px, 1fr)); gap:14px; }
+      .proof-grid > * { min-width:0; }
       .proof-cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+      .proof-cols > * { min-width:0; }
       .proof-tablewrap { overflow-x:auto; border:1px solid var(--color-hairline); border-radius:14px; background:#fff; }
       .proof-table { border-collapse:collapse; width:100%; min-width:720px; font-size:0.94rem; }
       .proof-table thead th { text-align:left; font-size:0.74rem; text-transform:uppercase; letter-spacing:0.06em;

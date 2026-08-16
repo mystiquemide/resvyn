@@ -3,7 +3,7 @@ import Nav from "@/components/Nav"
 import Footer from "@/components/Footer"
 
 export const metadata: Metadata = {
-  title: "Terms · Resvyn",
+  title: "Resvyn · Terms",
   description: "Terms of use for the Resvyn prototype.",
 }
 
