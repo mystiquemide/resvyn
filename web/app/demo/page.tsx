@@ -6,9 +6,9 @@ import StatusDot from "@/components/StatusDot"
 import DemoWalkthrough from "@/components/DemoWalkthrough"
 
 export const metadata: Metadata = {
-  title: "Demo · Resvyn",
+  title: "RWA Warranty Demo · Resvyn",
   description:
-    "A simulated, step-by-step walkthrough of the Resvyn warranty-reserve lifecycle. Every amount mirrors the real Mainnet proof run, but nothing here touches a chain.",
+    "Walk through the Resvyn RWA warranty loop: merchant reserve, buyer-bound coverage, claim, bounded AI decision, payout and reserve reconciliation.",
 }
 
 export default function DemoPage() {
@@ -16,7 +16,6 @@ export default function DemoPage() {
     <>
       <Nav />
 
-      {/* Permanent honesty banner. This surface is never Mainnet proof. */}
       <div
         style={{
           position: "sticky",
@@ -32,10 +31,10 @@ export default function DemoPage() {
         >
           <StatusDot tone="warn" />
           <span style={{ fontSize: "0.86rem", color: "var(--color-ink)", fontWeight: 500 }}>
-            Simulated walkthrough. Numbers mirror the real Mainnet proof, but nothing here touches a chain.
+            Guided simulation of the real warranty business loop. Amounts mirror the recorded Mainnet run.
           </span>
           <Link href="/proof" className="link-teal" style={{ fontSize: "0.86rem", marginLeft: "auto" }}>
-            See the real proof
+            Verify the Mainnet receipts
           </Link>
         </div>
       </div>

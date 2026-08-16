@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { defineChain, numberToHex, parseTransaction, type Hex } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import {
   buildIsSponsorableRequest,
@@ -15,13 +15,8 @@ import {
 
 // Unit tests for the BOT Chain EOA-paymaster client. No live chain and no live
 // paymaster: the JSON-RPC transport is stubbed so we assert the exact request
-// shapes and behaviour the doc specifies (pm_isSponsorable + zero-gas
-// eth_sendRawTransaction). This is what makes the gasless path real code today
-// even though no public chain-677 endpoint exists to run it against yet.
-
-// A throwaway key. Test-only, never used on any live chain.
-const TEST_KEY: Hex = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-const account = privateKeyToAccount(TEST_KEY);
+// shapes and behaviour the docs specify.
+const account = privateKeyToAccount(generatePrivateKey());
 
 const chain = defineChain({
   id: 677,
@@ -73,7 +68,6 @@ describe("paymaster: result parsing", () => {
   it("treats a false or absent Sponsorable as not sponsorable", () => {
     assert.equal(parseSponsorResult({ Sponsorable: false }).sponsorable, false);
     assert.equal(parseSponsorResult({}).sponsorable, false);
-    // A truthy-but-not-true value must not count as sponsorable.
     assert.equal(parseSponsorResult({ Sponsorable: "yes" }).sponsorable, false);
   });
 
@@ -117,7 +111,6 @@ describe("paymaster: sendSponsoredTransaction", () => {
     });
     assert.equal(out.sponsored, false);
     assert.equal(out.hash, undefined);
-    // Only the sponsorability probe ran; nothing was sent.
     assert.deepEqual(methods, ["pm_isSponsorable"]);
   });
 
@@ -145,9 +138,6 @@ describe("paymaster: sendSponsoredTransaction", () => {
     assert.equal(out.policy, "resvyn");
     assert.equal(out.hash, "0xabc123");
 
-    // The signed blob must actually carry zero gas fees and the right call.
-    // viem RLP-decodes a zero fee field back as undefined (empty bytes), so
-    // absent here means zero, which is exactly what we want.
     assert.ok(submittedRaw, "a raw tx should have been submitted");
     const decoded = parseTransaction(submittedRaw!);
     assert.equal(decoded.to, TO);

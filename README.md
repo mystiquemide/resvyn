@@ -2,198 +2,285 @@
 
 **Fund the warranty before you issue it.**
 
-Resvyn is a merchant-funded warranty reserve on BOT Chain. A merchant locks
-native BOT, issues buyer-bound coverage whose full maximum payout is reserved
-upfront, and a bounded evaluator signs EIP-712 decisions that settle claims
-directly from the locked reserve.
+Resvyn is RWA warranty infrastructure on BOT Chain. A merchant deposits native
+BOT, issues buyer-bound product coverage, and the contract locks that
+coverage's full maximum payout before the warranty becomes valid. If the buyer
+opens a claim, a bounded evaluator produces a signed decision that the contract
+verifies before paying from the reserved funds.
 
-> **Winning invariant: "No funded reserve, no valid coverage."**
+> **No funded reserve, no valid coverage.**
 
-## Evidence model (read this first)
+Resvyn is designed for real-world commerce where a warranty is a financial
+promise attached to a physical purchase. The product turns that promise into a
+verifiable, funded liability instead of leaving the buyer to trust that money
+will still be available when a claim arrives.
 
-Resvyn is a **self-attestation scheme with server-side structural
-verification** — not independent AI evidence verification:
+## The business loop
 
-- The claimant or merchant attests the evidence content once; the server
-  verifies the content commits to the claim's on-chain evidence hash, that
-  the signer owns the claim, and — independently of the claimant — that the
-  product/receipt notes hash to the coverage's on-chain
-  `productHash`/`receiptHash` committed at issuance.
-- Product/receipt match are DERIVED SERVER-SIDE from those on-chain
-  commitments. The remaining flags (damage eligibility, evidence
-  completeness, file integrity) are self-attestations and are labeled as
-  such in the UI and docs.
-- A claim whose product note does not match the coverage hash is rejected
-  (PRODUCT_MISMATCH), never approved.
+1. **Merchant funds a reserve** with native BOT.
+2. **Merchant issues coverage** for a real buyer and commits the product and
+   receipt hashes on chain.
+3. **The full maximum payout is locked** immediately. The same funds cannot be
+   withdrawn or reused for another warranty.
+4. **Buyer opens a claim** and commits one evidence hash.
+5. **Authorized evidence is evaluated** under bounded policy. The evaluator
+   signs an EIP-712 decision tied to the exact claim and deployment.
+6. **The contract settles**. Approval pays the buyer and rejection releases the
+   lock. Either outcome is terminal.
+7. **Unused coverage expires** and releases its reserve after the warranty
+   window ends.
 
-## Status
+This creates a simple value loop for merchants and buyers: merchants can prove
+that warranties are funded, buyers can verify the backing before relying on the
+promise, and settlement leaves an on-chain audit trail.
 
-- **Mainnet proof: LIVE and independently verified.** The recorded proof
-  lifecycle (deploy, deposit, issue, open, resolve/pay, withdraw) ran on BOT
-  Chain Mainnet (chain 677) and every receipt reconciles to the current state.
-- **Proof deployment is READ-ONLY (REV-002).** The app refuses all writes
-  against the archived proof instance. New operational writes require a fresh
-  deployment verified through the manifest gate described below.
-- **Not an audited production system.** This is a hackathon-grade prototype
-  with a strong contract core. See `SECURITY.md` and the "Known limitations"
-  section.
+## BOT Chain Mainnet proof
 
-## 30-second proof
+A complete Resvyn lifecycle has already executed on BOT Chain Mainnet,
+chain ID `677`:
 
-1. Open the live proof page: **`/proof`** (in the deployed app) — it re-reads
-   the contract, the six Mainnet receipts, and the reconciled state live.
-2. Contract: [`0x414592d2313d233b673b1f97803c261355ccd996`](https://scan.botchain.ai/address/0x414592d2313d233b673b1f97803c261355ccd996)
-   on BOT Chain Mainnet (chain 677).
-3. Payout transaction (`ClaimPaid`, 0.001 BOT):
-   [`0x22fdef36c1213ce62ef58b6842e0209aa6e429677b089c23367ffabe5b72bb2d`](https://scan.botchain.ai/tx/0x22fdef36c1213ce62ef58b6842e0209aa6e429677b089c23367ffabe5b72bb2d)
-4. Negative checks (call-level, no state change):
-   - Over-cap issuance reverts `InsufficientFreeReserve`.
-   - Replayed signed settlement reverts `NonceAlreadyUsed`.
+- WarrantyReserve proof deployment:
+  [`0x414592d2313d233b673b1f97803c261355ccd996`](https://scan.botchain.ai/address/0x414592d2313d233b673b1f97803c261355ccd996)
+- Approved claim payout, `0.001 BOT`:
+  [`0x22fdef36c1213ce62ef58b6842e0209aa6e429677b089c23367ffabe5b72bb2d`](https://scan.botchain.ai/tx/0x22fdef36c1213ce62ef58b6842e0209aa6e429677b089c23367ffabe5b72bb2d)
+- The `/proof` route re-reads the deployment and recorded receipts from BOT
+  Chain rather than treating screenshots or local logs as proof.
+- Negative call-level checks demonstrate that over-cap issuance is rejected and
+  a consumed settlement nonce cannot be replayed.
 
-## How it works
+The recorded proof deployment is intentionally **archived and read-only**. Its
+original evaluator key is no longer an operational signing authority. New live
+coverage must use a fresh Mainnet deployment whose evaluator signer is verified
+against the server configuration before the UI enables writes.
 
-```
-Merchant deposits BOT ──► reserve (free)
-Merchant issues coverage ──► locks maxPayout (free -= maxPayout)
-Claimant opens claim ──► binds claimant + evidence hash (one claim per coverage)
-Evaluator signs EIP-712 decision ──► approved → pay claimant, release lock
-                                  └── rejected → release lock, no payout
-Coverage expires unused ──► expireCoverage releases the lock exactly once
-```
+## Why this is RWA infrastructure
 
-- **Reserve accounting:** issuance rejects `maxPayout > freeReserve`;
-  withdrawal rejects amounts above `freeReserve` — the two winning-invariant
-  guards.
-- **Claims:** one terminal claim per coverage, claimant-only opening,
-  evidence-hash binding, nonce replay protection, effects-before-interactions
-  payout accounting, reentrancy guard.
-- **Expiry (REV-003):** claims cannot be opened after coverage expiry; an
-  unused, past-expiry coverage can be permissionlessly expired, releasing its
-  full lock exactly once. A claim opened before expiry remains settleable
-  (documented grace rule).
+Resvyn does not tokenize a physical product. It handles the funded warranty
+obligation attached to one.
 
-## Why BOT Chain
+A product sale creates a real-world service liability: the merchant promises a
+bounded amount if the covered item fails under agreed conditions. Resvyn makes
+that liability visible and collateralized on chain. The contract records:
 
-- The entire proof is a real Mainnet lifecycle: native BOT reserve, on-chain
-  events, public receipts, live RPC verification.
-- Optional BOT Chain EOA Paymaster client exists (`scripts/paymaster.ts`) but
-  is **inert unless a real endpoint is configured** — as of this writing no
-  public chain-677 endpoint is available. It is not presented as operational.
+- who issued the coverage,
+- who owns the claim right,
+- product and receipt commitments,
+- the maximum financial exposure,
+- the expiry,
+- the reserve locked behind the promise,
+- and the final settlement outcome.
+
+The same primitive can support electronics resellers, appliance merchants,
+repair shops, refurbished-device sellers and independent manufacturers that
+want a buyer-verifiable warranty reserve without creating a separate custodian.
+
+## AI is inside the settlement path
+
+AI is not used as a chatbot or copy layer. The optional Groq-backed evaluator is
+inside the claim decision path, behind deterministic safety checks.
+
+The evaluator can propose a structured decision, but it cannot bypass the
+contract's financial boundaries. The signed payload includes the chain,
+verifier, claim, coverage, claimant, evidence hash, amount, result, model
+version, expiry and nonce. The contract rejects wrong-chain decisions, wrong
+verifiers, mismatched claims, replayed nonces and approvals above the coverage
+cap.
+
+When the optional AI provider is enabled, provider errors, timeouts, malformed
+responses and schema failures fail closed without a settlement signature.
+
+## Evidence and authenticity model
+
+Resvyn is explicit about what it can verify.
+
+The claimant or merchant attests one evidence snapshot. The server checks that
+its canonical hash is the hash already committed by the on-chain claim and that
+the signer is authorized for that claim. Product and receipt matches are
+independently derived by comparing the supplied notes with the hashes committed
+at coverage issuance.
+
+Damage eligibility, evidence completeness and file-integrity flags remain
+attestations from the authorized party. Resvyn therefore provides cryptographic
+binding, reserve solvency and policy enforcement. It does not claim to prove
+physical-world damage without an external oracle or inspection source.
+
+## Contract invariants
+
+`contracts/WarrantyReserve.sol` enforces the financial core:
+
+- zero-value reserve deposits are rejected;
+- coverage requires a real claimant, non-zero product and receipt commitments,
+  a non-zero payout cap and a future expiry;
+- `maxPayout` cannot exceed the merchant's free reserve;
+- locked exposure increases by the full `maxPayout` at issuance;
+- withdrawals cannot touch locked exposure and zero-value withdrawals are
+  rejected;
+- only the bound buyer can open a claim;
+- one coverage can create at most one claim;
+- claims bind exactly one evidence hash;
+- settlement requires the immutable evaluator's EIP-712 signature;
+- approved payouts are bounded by `maxPayout`;
+- nonces are single-use and terminal claims cannot be paid twice;
+- payout accounting is updated before the external transfer and settlement is
+  reentrancy guarded;
+- failed payouts revert the entire state transition;
+- unused expired coverage releases its lock exactly once.
+
+## Product surfaces
+
+The Next.js app under `web/` contains the full product surface:
+
+- `/` — product and RWA value proposition
+- `/app` — wallet workspace for reserve funding, coverage issuance, claims,
+  evaluation, settlement and withdrawals
+- `/demo` — controlled lifecycle walkthrough for fast product understanding
+- `/proof` — live Mainnet proof verifier
+- `/reserve` — public reserve lookup
+- `/faq` — product and trust-model answers
+- `/privacy` and `/terms` — supporting product pages
+
+The default repository configuration points `/app` at the archived proof
+instance and therefore renders writes read-only. Operators must explicitly
+configure and verify a fresh deployment before enabling transactions.
 
 ## Architecture
 
+```text
+Merchant / buyer wallet
+        │
+        ├── deposit / issue / open / resolve / withdraw
+        ▼
+BOT Chain Mainnet
+WarrantyReserve.sol
+        ▲
+        │ EIP-712 bounded decision
+        │
+Next.js evaluator API
+        ▲
+        │ authorized evidence + claim state
+        │
+Deterministic policy ── optional AI decision layer
 ```
-Browser (Wagmi/Viem) ──► /api/evaluate (Next.js server)
-        │                      │ reads live claim/coverage state
-        │ evidence attestation │ (claimant/merchant signs EIP-191)
-        ▼                      ▼
-BOT Chain WarrantyReserve ◄── evaluator key signs EIP-712 decision
-```
 
-- `contracts/WarrantyReserve.sol` — the reserve/claim contract (Solidity
-  0.8.28, OpenZeppelin EIP712/ECDSA/ReentrancyGuard).
-- `scripts/evaluator/` — original policy/schema/signing service (used by
-  rehearsal).
-- `web/lib/evaluator.server.ts` — web port of the evaluator; **parity-tested
-  byte-for-byte against the scripts version** (`parity/evaluator.parity.test.ts`).
-- `web/app/api/evaluate/route.ts` — signed-decision endpoint.
-- `web/components/AppConsole.tsx` — wallet console (read-only for archived
-  proof instance).
-- `web/lib/proofEngine.ts` — live proof verification.
+Important implementation paths:
 
-## Security / trust model
+- `contracts/WarrantyReserve.sol` — reserve, coverage and settlement contract
+- `scripts/evaluator/` — evaluator policy/schema/signing implementation
+- `parity/evaluator.parity.test.ts` — byte-level evaluator parity checks
+- `web/app/api/evidence/route.ts` — authenticated evidence intake
+- `web/app/api/evaluate/route.ts` — bounded signed-decision endpoint
+- `web/lib/evidenceStore.ts` — fail-closed evidence persistence
+- `web/components/AppConsole.tsx` — wallet workflow
+- `web/lib/proofEngine.ts` — Mainnet proof verification
 
-- The evaluator signing key lives only in server env (`RESVYN_EVALUATOR_KEY`).
-- **Evidence is server-owned (REV-001).** The claimant or merchant attests the
-  evidence CONTENT once at `POST /api/evidence`; the server requires the
-  content to hash to the claim's on-chain `evidenceHash`, so the chain
-  commitment verifiably commits to exactly the server-seen content. The
-  record is stored server-side, first-write-wins, immutable.
-- **`POST /api/evaluate` carries no evidence fields.** It accepts only claim
-  references plus a fresh EIP-191 authorization from the on-chain claimant or
-  coverage merchant, loads the server-owned evidence record bound to
-  `claim.evidenceHash`, derives every signal and the payout from it, and
-  **fails closed (no signature)** when no record exists or any check fails.
-- **Exact deployment gate (REV-002).** The route reads the contract's
-  immutable `evaluatorSigner` and requires it to match the address derived
-  from `RESVYN_EVALUATOR_KEY`; mismatches return 503 with no signature. The
-  app renders read-only unless the address is operational AND the pinned
-  `NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR` (when set) matches the live signer.
-- **Fail-closed evaluation (REV-006):** when the optional Groq brain is
-  configured and the provider fails (HTTP error, timeout, malformed output,
-  schema failure), no signature is returned.
-- Rate limits: per-client (only behind a declared trusted proxy), per-claim
-  (canonical ids), and global; blocked requests never burn the global budget
-  (REV-005).
-- See `SECURITY.md` for the full model and reporting path.
+## Why BOT Chain
+
+Resvyn uses BOT Chain as the settlement and reserve layer, not as a decorative
+network badge:
+
+- merchant reserves are native BOT held by the contract;
+- coverage locks and free-reserve accounting live on Mainnet;
+- claims and settlement receipts are publicly inspectable through BOTScan;
+- the app connects wallets directly to BOT Chain Mainnet;
+- the evaluator signature is bound to chain `677` and the exact verifier
+  contract, so a valid Resvyn decision cannot be replayed onto another chain or
+  deployment;
+- an EOA Paymaster integration is implemented for a future sponsored-claim path
+  and remains disabled unless an actual BOT Chain paymaster endpoint is
+  configured.
 
 ## Run locally
 
-Prerequisites: Node 22+, npm.
+Prerequisites: Node.js 22+ and npm.
 
 ```bash
-# Contracts (Hardhat)
+# Contracts
 npm ci
-npx hardhat compile
-npx hardhat test
+npm run compile
+npm test
+npm run test:parity
 
-# Web app (Next.js)
+# Web
 cd web
 npm ci
 npm run lint
 npm run typecheck
 npm test
 npm run build
+npm audit --omit=dev
 ```
 
-The web app reads from the Mainnet proof contract by default and renders it
-**read-only**. To enable writes against an operational deployment, the
-operator must pin the evaluator:
+## Operational deployment
+
+A write-enabled deployment needs a fresh Mainnet contract and a server that can
+persist evidence safely.
+
+Frontend configuration:
 
 ```bash
-NEXT_PUBLIC_RESVYN_ADDRESS=<operational-contract-address> \
-NEXT_PUBLIC_RESVYN_OPERATIONAL=1 \
-NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR=<on-chain evaluatorSigner> \
-npm run dev
+NEXT_PUBLIC_RESVYN_ADDRESS=<fresh-mainnet-contract>
+NEXT_PUBLIC_RESVYN_OPERATIONAL=1
+NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR=<contract-evaluator-signer>
+NEXT_PUBLIC_DEPLOY_START_BLOCK=<deployment-block>
 ```
 
-Server env for the evaluator route (never committed): `RESVYN_EVALUATOR_KEY`
-(required to sign), `RESVYN_GROQ_KEY` (optional brain), `RESVYN_RATE_LIMIT_*`,
-`RESVYN_TRUST_PROXY`, `RESVYN_EVIDENCE_STORE_PATH` (durable evidence store,
-default `./data/evidence-store.json`; writes fail closed if the disk is
-unwritable).
+Server configuration:
 
-The evidence flow survives reloads: the console queries
-`GET /api/evidence?coverageId&claimId` when claim references change and
-re-enables evaluation from the server-owned record, so a page refresh never
-strands a claim that was already attested.
+```bash
+RESVYN_EVALUATOR_KEY=<server-only-private-key>
+RESVYN_GROQ_KEY=<optional-provider-key>
+RESVYN_EVIDENCE_STORE_PATH=<durable-writable-path>
+```
 
-## Rehearsal
+The evidence store writes to disk before acknowledging intake. An operational
+host therefore needs durable writable storage. A multi-instance deployment
+needs shared persistence, and the process-local rate limiter should be replaced
+with a shared backend before horizontal scaling.
 
-`scripts/rehearse.ts` runs the full lifecycle against BOT Testnet (968) by
-default and refuses unknown chains (REV-008). See its header for env vars.
+See [`SECURITY.md`](SECURITY.md) for the complete trust model and deployment
+gates.
 
 ## Verification
 
-- Contract suite: 100+ Hardhat behavior/invariant tests, including expiry
-  lifecycle (REV-003), replay, cap boundaries, payout rollback, reentrancy.
-- Web suite: 30+ Vitest tests covering evaluator policy/schema, Groq
-  fail-closed, rate limiting, route trust boundary (auth, forgery, staleness,
-  archived gate), and evaluator parity.
-- CI: lint, type check, tests, production build, and `npm audit --omit=dev`
-  for the web app; compile + tests for the contracts (`.github/workflows/ci.yml`).
+CI currently gates:
 
-## Known limitations
+- Hardhat compilation and contract tests
+- evaluator parity tests
+- frontend linting and TypeScript checks
+- unit and API route integration tests
+- production Next.js build
+- production web dependency audit
 
-- The Mainnet deployment is a **proof instance**; its immutable evaluator
-  signer is no longer in use, so it is frozen read-only.
-- Evidence is attested by the claimant/merchant under their own key; the
-  evaluator verifies structure and policy, not physical-world truth.
-- Rate limiter and evidence attestation are stateless/single-instance; a
-  multi-instance deployment needs a shared store.
-- Root dev-tooling advisories (Low severity, no upstream fix) are tracked in
-  `SECURITY.md`.
+The contract suite covers reserve boundaries, multi-merchant isolation,
+coverage expiry, claim authorization, signature binding, payout rollback,
+replay resistance and reentrancy behavior.
+
+## Current limitations
+
+Resvyn is pre-production and should be treated accordingly:
+
+- the recorded Mainnet proof deployment is archived, so a fresh verified
+  deployment is required for new operational coverage;
+- the evaluator signer is immutable, which keeps settlement authority simple
+  but means signer loss requires migration to a new deployment;
+- physical-world damage is attested, not independently proven by an oracle;
+- the default evidence store is single-host durable storage, not a distributed
+  database;
+- rate limiting is process-local;
+- no independent production security audit has been completed yet.
+
+## Roadmap
+
+The next operational milestones are deliberately product-focused:
+
+1. fresh verified BOT Chain Mainnet deployment with a production-managed
+   evaluator key;
+2. public hosted product backed by durable evidence persistence;
+3. merchant checkout/API integration so coverage can be issued from real sales;
+4. optional independent inspection/oracle adapters for higher-value claims;
+5. shared evidence and rate-limit infrastructure for multi-instance hosting;
+6. external contract/security review before material value is placed at risk.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [`LICENSE`](LICENSE).

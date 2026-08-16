@@ -5,32 +5,63 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - name: Reject common committed-secret signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='(gsk_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|xox[baprs]-[0-9A-Za-z-]{20,}|-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----)'
+          if git grep -nE "$pattern" -- . ':!package-lock.json' ':!web/package-lock.json'; then
+            echo "Potential secret material found in tracked files."
+            exit 1
+          fi
+
   contracts:
     name: Contracts (compile + tests)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci --no-audit --no-fund
-      - run: npx hardhat compile
-      - run: npx hardhat test
-      - name: Evaluator parity (scripts vs web)
-        run: node --test --import tsx parity/evaluator.parity.test.ts
+      - name: Compile
+        run: npm run compile
+      - name: Contract tests
+        run: npm test
+      - name: Evaluator parity
+        run: npm run test:parity
+      - name: Dependency audit (high and critical)
+        run: npm audit --audit-level=high
 
   web:
     name: Web (lint + type + test + build + audit)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -39,11 +70,10 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Type check
-        run: npx tsc --noEmit
+        run: npm run typecheck
       - name: Unit + route integration tests
         run: npm test
       - name: Production build
         run: npm run build
       - name: Production dependency audit
         run: npm audit --omit=dev
-        continue-on-error: false

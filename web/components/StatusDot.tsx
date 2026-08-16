@@ -1,7 +1,7 @@
 type Tone = "ok" | "idle" | "pending" | "warn" | "fail"
 
 const COLORS: Record<Tone, string> = {
-  ok: "var(--color-teal)",
+  ok: "#16803b",
   idle: "var(--color-muted-2)",
   pending: "var(--color-teal)",
   warn: "#c98a1a",
