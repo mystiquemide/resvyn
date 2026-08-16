@@ -26,7 +26,7 @@ export default function ProofPage() {
             Two deployments, <span className="em">one verifiable story.</span>
           </h1>
           <p className="lead" style={{ marginTop: 16 }}>
-            Resvyn's current hardened contract is live and source-verified on BOT Chain Mainnet. The earlier proof instance is preserved separately
+            Resvyn’s current hardened contract is live and source-verified on BOT Chain Mainnet. The earlier proof instance is preserved separately
             because it contains a complete disposable warranty lifecycle: reserve funding, coverage, claim, evaluator-authorized payout, and reserve
             reconciliation. The proof verifier below reads that recorded lifecycle directly from chain 677.
           </p>
