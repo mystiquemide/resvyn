@@ -213,7 +213,9 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
     }
 
     /// @notice Withdraw only the caller's uncommitted reserve.
-    function withdrawReserve(uint256 amount) external nonReentrant {
+    /// @dev State is reduced before transferring, so a re-entrant caller sees
+    ///      the already-updated balance and remains bounded by free reserve.
+    function withdrawReserve(uint256 amount) external {
         if (amount == 0) revert ZeroWithdrawal();
         uint256 free = _reserveBalance[msg.sender] - _lockedExposure[msg.sender];
         if (amount > free) revert WithdrawalExceedsFreeReserve(free, amount);
