@@ -3,7 +3,7 @@ import { privateKeyToAccount } from "viem/accounts"
 import { keccak256, stringToHex } from "viem"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { writeFileSync, rmSync } from "node:fs"
+import { writeFileSync, rmSync, readFileSync } from "node:fs"
 import { evidenceContentHash, noteHash } from "@/lib/evidenceContent"
 import { resetEvidenceStoreForTests } from "@/lib/evidenceStore"
 import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
@@ -345,7 +345,7 @@ describe("GET /api/evidence (REV-016 round 4: browser rehydration)", () => {
     expect(body.claimId).toBe("1")
   })
 
-  it("reports attested=true with the stored content after intake (reload recovery)", async () => {
+  it("reports attested=true with hash/derived (no raw content) after intake (reload recovery)", async () => {
     resetEvidenceStoreForTests()
     const intake = await postIntake(await intakeBody(claimant))
     expect(intake.status).toBe(200)
@@ -354,10 +354,12 @@ describe("GET /api/evidence (REV-016 round 4: browser rehydration)", () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.attested).toBe(true)
-    expect(body.content.productNote).toBe(evidenceContent.productNote)
-    expect(body.content.requestedAmountWei).toBe(evidenceContent.requestedAmountWei)
+    expect(body.evidenceHash.toLowerCase()).toBe(EVIDENCE_HASH.toLowerCase())
     expect(body.derived.productMatches).toBe(true)
     expect(body.derived.receiptMatches).toBe(true)
+    // REV-005 round 5: raw evidence content is NOT exposed to unauthenticated
+    // callers; the browser only needs the attested flag.
+    expect(body.content).toBeUndefined()
   })
 
   it("is claim-bound: another claim with the same hash reports unattested", async () => {
@@ -388,6 +390,31 @@ describe("GET /api/evidence (REV-016 round 4: browser rehydration)", () => {
     } finally {
       delete process.env.RESVYN_EVIDENCE_STORE_PATH
       rmSync(blocker, { force: true })
+    }
+  })
+
+  it("fails closed when the persisted store is corrupt: no reads, no overwrite (REV-005r5)", async () => {
+    resetEvidenceStoreForTests()
+    const corrupt = join(tmpdir(), `resvyn-corrupt-${process.pid}.json`)
+    writeFileSync(corrupt, "{ this is not valid json")
+    process.env.RESVYN_EVIDENCE_STORE_PATH = corrupt
+    const { __forceReinitForTests } = await import("@/lib/evidenceStore")
+    __forceReinitForTests()
+    try {
+      // Intake must refuse (store unavailable), not silently start empty.
+      const res = await postIntake(await intakeBody(claimant))
+      expect(res.status).toBe(503)
+      expect((await res.json()).error).toBe("evidence_store_failed")
+      // The corrupt file must NOT have been overwritten by an empty store.
+      expect(readFileSync(corrupt, "utf8")).toBe("{ this is not valid json")
+      // Reads fail closed too.
+      const { GET } = await import("../evidence/route")
+      const status = await GET(new Request("http://localhost/api/evidence?coverageId=1&claimId=1"))
+      expect(status.status).toBe(200)
+      expect((await status.json()).attested).toBe(false)
+    } finally {
+      delete process.env.RESVYN_EVIDENCE_STORE_PATH
+      rmSync(corrupt, { force: true })
     }
   })
 })
@@ -531,7 +558,8 @@ describe("POST /api/evaluate (REV-001 round 2)", () => {
     // even if the store were shared, the seen-hash seeding must make the
     // policy treat H as duplicate for claim 2.
     await postIntake(await intakeBody(claimant))
-    const seen = (await import("@/lib/evidenceStore")).getSeenEvidenceHashes("2")
+    const { getSeenEvidenceHashes } = await import("@/lib/evidenceStore")
+    const seen = await getSeenEvidenceHashes("2")
     expect(seen.has(EVIDENCE_HASH.toLowerCase())).toBe(true)
     // And evaluating claim 2 is refused outright (claim-bound).
     const res = await postEvaluate(await evaluateBody(claimant, { coverageId: "2", claimId: "2" }))

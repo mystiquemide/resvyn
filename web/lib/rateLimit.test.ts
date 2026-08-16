@@ -112,6 +112,21 @@ describe("consumeGlobalBudget (REV-005 rounds 3/4)", () => {
     expect(consumeGlobalBudget().allowed).toBe(true)
     expect(consumeGlobalBudget().allowed).toBe(false) // global exhausted at 3
   })
+
+  // REV-005 round 5: buckets must not grow without bounds. Expired windows
+  // are swept once the map exceeds MAX_BUCKETS, and an all-live pathological
+  // map drops the oldest half.
+  it("evicts expired buckets once the map grows past the cap", () => {
+    process.env.RESVYN_RATE_LIMIT_MAX = "1" // every client gets one hit
+    process.env.RESVYN_RATE_LIMIT_WINDOW_MS = "50" // then expires fast
+    // Fill the map past MAX_BUCKETS with unique keys.
+    for (let i = 0; i < 10_050; i++) {
+      expect(checkClientLimit(`evict-${i}`).allowed).toBe(true)
+    }
+    // The first buckets are now long expired; the map must have been swept
+    // (bounded size) and the same keys can be reused without error.
+    expect(checkClientLimit("evict-0").allowed).toBe(true)
+  })
 })
 
 describe("clientKeyFromRequest (REV-005)", () => {

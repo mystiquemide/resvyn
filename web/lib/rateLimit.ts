@@ -37,8 +37,35 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>()
 
+// REV-005 round 5: buckets must not grow without bounds. When the map
+// exceeds this size, expired windows are swept in O(n) before the next hit.
+const MAX_BUCKETS = 10_000
+
 export function resetRateLimiterForTests(): void {
   buckets.clear()
+}
+
+/** Delete buckets whose window has fully elapsed (windowMs is configurable). */
+function sweepExpired(): void {
+  if (buckets.size < MAX_BUCKETS) return
+  const cfg = readConfig()
+  const t = now()
+  let kept = 0
+  for (const [key, b] of buckets) {
+    if (t - b.windowStart >= cfg.windowMs) {
+      buckets.delete(key)
+    } else {
+      kept += 1
+    }
+  }
+  // If everything is still live (pathological), drop the oldest half so the
+  // map can never grow unboundedly.
+  if (kept >= MAX_BUCKETS) {
+    const sorted = [...buckets.entries()].sort((a, b2) => a[1].windowStart - b2[1].windowStart)
+    for (const [key] of sorted.slice(0, Math.floor(sorted.length / 2))) {
+      buckets.delete(key)
+    }
+  }
 }
 
 function readConfig(): { max: number; windowMs: number; globalMax: number; claimMax: number } {
@@ -59,6 +86,7 @@ function now(): number {
 }
 
 function hit(key: string, max: number, windowMs: number): RateLimitResult {
+  sweepExpired()
   const t = now()
   const b = buckets.get(key)
   if (!b || t - b.windowStart >= windowMs) {

@@ -472,12 +472,25 @@ export default function AppConsole() {
         const opened = decoded.find((e) => e.eventName === "ClaimOpened")
         if (opened && "claimId" in opened.args) {
           const id = String(opened.args.claimId)
+          const coverageId = String(opened.args.coverageId ?? openCoverageId)
           setEvalClaimId(id)
           // REV-016: bind the committed evidence snapshot to the REAL opened
-          // claim id so attestation can never target a different claim.
-          setEvidenceSnapshot((prev) =>
-            prev ? { ...prev, claimId: id, coverageId: String(opened.args.coverageId ?? prev.coverageId) } : prev,
-          )
+          // claim id so attestation can never target a different claim, and
+          // persist it to localStorage so a pre-intake reload can still
+          // attest the exact same content (round 5 recovery).
+          setEvidenceSnapshot((prev) => {
+            if (!prev) return prev
+            const bound = { ...prev, claimId: id, coverageId }
+            try {
+              localStorage.setItem(
+                `resvyn:evidence:${APP_CHAIN.id}:${contract}:${coverageId}:${id}`,
+                JSON.stringify({ content: bound.content, hash: bound.hash }),
+              )
+            } catch {
+              /* localStorage unavailable; the in-memory snapshot still works */
+            }
+            return bound
+          })
         }
       }
       await refresh()
@@ -539,24 +552,37 @@ export default function AppConsole() {
     )
   }
 
-  // REV-016 (round 4): after a reload the in-memory snapshot is gone. Query
-  // the server-owned store: if the claim already has an attested record,
-  // rehydrate the snapshot and re-enable Evaluate. Bound to the claim refs,
-  // never to form fields (the record is immutable server-side).
+  // REV-016 (round 4/5): after a reload the in-memory snapshot is gone.
+  // 1) localStorage: the EXACT snapshot committed at openClaim survives
+  //    reloads, so a pre-intake reload can still attest the same content.
+  // 2) GET /api/evidence: the attested flag re-enables Evaluate for claims
+  //    whose intake already succeeded. The server no longer returns raw
+  //    content (round 5); the localStorage copy covers the display side.
   useEffect(() => {
     let cancelled = false
     async function rehydrate() {
       if (!deployed || !evalCoverageId || !evalClaimId) return
+      const snapshotKey = `resvyn:evidence:${APP_CHAIN.id}:${contract ?? APP_CONTRACT_ADDRESS}:${evalCoverageId}:${evalClaimId}`
+      // Local snapshot (pre-intake reload recovery).
+      try {
+        const raw = localStorage.getItem(snapshotKey)
+        if (raw && !cancelled) {
+          const saved = JSON.parse(raw) as { content: EvidenceContent; hash: `0x${string}` }
+          setEvidenceSnapshot({
+            content: saved.content,
+            hash: saved.hash,
+            claimId: String(BigInt(evalClaimId)),
+            coverageId: String(BigInt(evalCoverageId)),
+          })
+        }
+      } catch {
+        // localStorage unavailable/private mode: rely on the server flag.
+      }
+      // Server attested flag (post-intake reload recovery).
       try {
         const res = await fetch(`/api/evidence?coverageId=${encodeURIComponent(evalCoverageId)}&claimId=${encodeURIComponent(evalClaimId)}`)
         const body = await res.json()
         if (cancelled || !body.attested) return
-        setEvidenceSnapshot({
-          content: body.content as EvidenceContent,
-          hash: body.evidenceHash as `0x${string}`,
-          claimId: String(BigInt(evalClaimId)),
-          coverageId: String(BigInt(evalCoverageId)),
-        })
         setEvidenceAttested(true)
         setAction("evaluate", { status: "idle", message: "Evidence already attested server-side; evaluation is enabled." })
       } catch {
@@ -567,7 +593,7 @@ export default function AppConsole() {
     return () => {
       cancelled = true
     }
-  }, [deployed, evalCoverageId, evalClaimId])
+  }, [deployed, evalCoverageId, evalClaimId, contract])
 
   // REV-016 round 3: the evidence content is built ONCE when the claim is
   // opened and the exact snapshot is kept in state, so the hash committed
@@ -667,10 +693,18 @@ export default function AppConsole() {
         // REV-016 round 4: a 409 evidence_conflict means a previous intake
         // already succeeded (e.g. before a reload). Recover: treat the claim
         // as attested and enable Evaluate instead of stranding the flow.
-        if (res.status === 409 && body.error === "evidence_conflict") {
+        // Round 5: ONLY an evidence_conflict for the EXACT hash we attested
+        // counts as success - store-full, claim-closed, or other 409s are
+        // real failures, not attestations.
+        if (
+          res.status === 409 &&
+          body.error === "evidence_conflict" &&
+          typeof body.evidenceHash === "string" &&
+          body.evidenceHash.toLowerCase() === evidenceSnapshot.hash.toLowerCase()
+        ) {
           setEvidenceAttested(true)
           setAction("evaluate", { status: "confirmed", message: "Evidence was already attested server-side; evaluation is enabled." })
-          pushLog({ event: "Evidence already attested", detail: `hash ${body.evidenceHash?.slice(0, 12) ?? "unknown"}`, tone: "ok" })
+          pushLog({ event: "Evidence already attested", detail: `hash ${body.evidenceHash.slice(0, 12)}`, tone: "ok" })
           return
         }
         const msg2 =

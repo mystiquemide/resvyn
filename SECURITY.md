@@ -53,12 +53,19 @@ before public disclosure unless coordinated otherwise.
   replace). A multi-instance deployment must share that volume or use a
   shared store; the server does not silently drop attested evidence on
   restart. Writes are DISK-FIRST and fail closed: if the disk write fails
-  the route returns 503 and stores nothing (the client can retry).
+  the route returns 503 and stores nothing (the client can retry). Reads
+  always initialize the store first (cold-start safe), writes are
+  serialized, and a store that fails to load becomes unavailable instead of
+  being silently overwritten with an empty map.
 - **Evidence recovery (REV-016):** after a reload, `GET /api/evidence`
-  returns the claim's stored record, so the console re-enables evaluation
-  from the server-owned store instead of stranding the flow; a 409
-  `evidence_conflict` on attestation is treated as already-attested by the
-  client.
+  returns the claim's stored record status (attested flag + hash + derived
+  summary only — raw evidence content is never exposed to unauthenticated
+  callers), so the console re-enables evaluation from the server-owned store
+  instead of stranding the flow. The exact evidence snapshot committed at
+  openClaim is also persisted to browser localStorage, so a reload between
+  openClaim and attestation can still attest the same content. Only a 409
+  `evidence_conflict` for the exact attested hash counts as "already
+  attested".
 - **Fail-closed evaluation (REV-006):** when the optional Groq brain is
   configured and the provider fails (HTTP error, timeout, malformed output,
   schema failure), no signature is returned. An outage pauses the Groq path;

@@ -1,5 +1,5 @@
 /*
- * REV-001 (round 3/4): server-owned evidence store.
+ * REV-001 (round 3/4/5): server-owned evidence store.
  *
  * Evidence is submitted ONCE to POST /api/evidence (authenticated claimant or
  * merchant), verified against live chain state (claim open, coverage match,
@@ -25,9 +25,12 @@
  *    atomic replace BEFORE the in-memory write is committed. If the disk
  *    write fails, putEvidence returns an error and nothing is stored, so a
  *    restart can never silently lose a record that was acknowledged.
- *  - RECOVERABLE (round 4): getEvidenceByClaim() lets the API answer
- *    "is this claim already attested?" after a reload, so the browser flow
- *    can rehydrate instead of being stranded.
+ *  - RECOVERABLE (round 4/5): getEvidenceByClaim() lets the API answer
+ *    "is this claim already attested?" after a reload. Reads initialize the
+ *    store from disk (round 5: cold-start reads no longer skip persistence),
+ *    writes are serialized so concurrent intakes cannot lose acknowledged
+ *    records, and a corrupted/unreadable store FAILS CLOSED (no reads, no
+ *    overwrites) instead of starting empty.
  */
 
 import type { StoredEvidence } from "./evidenceTypes"
@@ -39,7 +42,14 @@ function storePath(): string {
   return process.env.RESVYN_EVIDENCE_STORE_PATH || "./data/evidence-store.json"
 }
 
-/** Lazy load from disk. Idempotent; safe to call on every request. */
+/**
+ * Ensure the store has been loaded from disk. Called by every read AND write
+ * (round 5: cold-start reads must not skip persistence initialization).
+ *
+ * If loading fails the store FAILS CLOSED: reads return nothing and writes
+ * are refused, so a corrupted store can never be silently overwritten with
+ * an empty map.
+ */
 export async function initEvidenceStore(): Promise<void> {
   if (loaded) return
   loaded = true
@@ -52,55 +62,75 @@ export async function initEvidenceStore(): Promise<void> {
       claimIndex.set(claimKey(record.coverageId, record.claimId), k.toLowerCase())
     }
   } catch (e) {
-    console.error("[evidenceStore] failed to load persisted evidence, starting empty:", e instanceof Error ? e.message : String(e))
+    loadFailed = true
+    console.error("[evidenceStore] FAILED to load persisted evidence; store is unavailable (fail closed):", e instanceof Error ? e.message : String(e))
   }
 }
 
 /**
  * Store an evidence record. DISK-FIRST (round 4): the record is written and
- * atomically renamed on disk before it is committed to memory. Returns
- * { ok: false } with a code + reason when the hash is already stored
- * ("conflict", immutable), the store is full ("full"), or the disk write
- * failed ("write_failed") - in every failure case nothing is stored and the
- * caller can retry.
+ * atomically renamed on disk before it is committed to memory. Writes are
+ * SERIALIZED (round 5) so two concurrent intakes each persist the latest
+ * state instead of one overwriting the other's acknowledged record.
+ *
+ * Returns { ok: false } with a code + reason when the hash is already stored
+ * ("conflict", immutable), the store is full ("full"), the disk write failed
+ * ("write_failed"), or the store failed to load ("unavailable") - in every
+ * failure case nothing is stored and the caller can retry.
  */
-export async function putEvidence(
+export function putEvidence(
   evidenceHash: string,
   record: StoredEvidence,
-): Promise<{ ok: true } | { ok: false; code: "conflict" | "full" | "write_failed"; reason: string }> {
-  await initEvidenceStore()
-  const key = evidenceHash.toLowerCase()
-  if (store.has(key)) {
-    return { ok: false, code: "conflict", reason: "Evidence for this hash is already stored and immutable." }
-  }
-  if (store.size >= MAX_RECORDS) {
-    return { ok: false, code: "full", reason: "Evidence store is full; retry later." }
-  }
-  const next = new Map(store)
-  next.set(key, record)
-  try {
-    const { persistStore } = await import("./evidenceFs")
-    await persistStore(storePath(), Object.fromEntries(next))
-  } catch (e) {
-    console.error("[evidenceStore] disk write failed; record NOT stored:", e instanceof Error ? e.message : String(e))
-    return { ok: false, code: "write_failed", reason: "Evidence store write failed; retry later." }
-  }
-  // Only now commit to memory.
-  store.set(key, record)
-  claimIndex.set(claimKey(record.coverageId, record.claimId), key)
-  return { ok: true }
+): Promise<{ ok: true } | { ok: false; code: "conflict" | "full" | "write_failed" | "unavailable"; reason: string }> {
+  // Serialize all writes through one promise chain.
+  const run = writeChain.then(async () => {
+    await initEvidenceStore()
+    if (loadFailed) {
+      return { ok: false, code: "unavailable", reason: "Evidence store is unavailable (failed to load); no records can be accepted." } as const
+    }
+    const key = evidenceHash.toLowerCase()
+    if (store.has(key)) {
+      return { ok: false, code: "conflict", reason: "Evidence for this hash is already stored and immutable." } as const
+    }
+    if (store.size >= MAX_RECORDS) {
+      return { ok: false, code: "full", reason: "Evidence store is full; retry later." } as const
+    }
+    const next = new Map(store)
+    next.set(key, record)
+    try {
+      const { persistStore } = await import("./evidenceFs")
+      await persistStore(storePath(), Object.fromEntries(next))
+    } catch (e) {
+      console.error("[evidenceStore] disk write failed; record NOT stored:", e instanceof Error ? e.message : String(e))
+      return { ok: false, code: "write_failed", reason: "Evidence store write failed; retry later." } as const
+    }
+    // Only now commit to memory.
+    store.set(key, record)
+    claimIndex.set(claimKey(record.coverageId, record.claimId), key)
+    return { ok: true } as const
+  })
+  // Keep the chain alive for the next write even if this one rejects.
+  writeChain = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
 }
 
 /** Look up a stored evidence record by lowercase evidence hash. */
-export function getEvidence(evidenceHash: string): StoredEvidence | undefined {
+export async function getEvidence(evidenceHash: string): Promise<StoredEvidence | undefined> {
+  await initEvidenceStore()
+  if (loadFailed) return undefined
   return store.get(evidenceHash.toLowerCase())
 }
 
 /**
- * REV-016/REV-017 round 4: look up a record by its claim binding, so the API
- * can answer "has this claim already attested?" for browser rehydration.
+ * REV-016/REV-017 round 4/5: look up a record by its claim binding, so the
+ * API can answer "has this claim already attested?" for browser rehydration.
  */
-export function getEvidenceByClaim(coverageId: string, claimId: string): StoredEvidence | undefined {
+export async function getEvidenceByClaim(coverageId: string, claimId: string): Promise<StoredEvidence | undefined> {
+  await initEvidenceStore()
+  if (loadFailed) return undefined
   const hash = claimIndex.get(claimKey(coverageId, claimId))
   return hash ? store.get(hash) : undefined
 }
@@ -111,8 +141,10 @@ export function getEvidenceByClaim(coverageId: string, claimId: string): StoredE
  * policy's seenEvidenceHashes with this, so the same public evidence hash
  * used by a second claim is rejected as DUPLICATE_EVIDENCE.
  */
-export function getSeenEvidenceHashes(excludeClaimId?: string): Set<string> {
+export async function getSeenEvidenceHashes(excludeClaimId?: string): Promise<Set<string>> {
+  await initEvidenceStore()
   const seen = new Set<string>()
+  if (loadFailed) return seen
   for (const [hash, record] of store) {
     if (excludeClaimId === undefined || record.claimId !== excludeClaimId) {
       seen.add(hash)
@@ -125,7 +157,16 @@ export function getSeenEvidenceHashes(excludeClaimId?: string): Set<string> {
 export function resetEvidenceStoreForTests(): void {
   store.clear()
   claimIndex.clear()
+  // Keep the loaded flag set so tests never re-read the on-disk file (which
+  // may hold records from an earlier test run).
   loaded = true
+  loadFailed = false
+}
+
+/** Test-only: force the next access to re-run init (load-failure tests). */
+export function __forceReinitForTests(): void {
+  loaded = false
+  loadFailed = false
 }
 
 function claimKey(coverageId: string, claimId: string): string {
@@ -135,3 +176,5 @@ function claimKey(coverageId: string, claimId: string): string {
 const store: Map<string, StoredEvidence> = new Map()
 const claimIndex: Map<string, string> = new Map()
 let loaded = false
+let loadFailed = false
+let writeChain: Promise<void> = Promise.resolve()

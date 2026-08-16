@@ -238,7 +238,7 @@ export async function POST(req: Request) {
 
   // 9) REV-001 round 3: load the SERVER-OWNED evidence record bound to the
   //    on-chain evidence hash. No record -> fail closed, no signature.
-  const record = getEvidence(claim.evidenceHash as `0x${string}`)
+  const record = await getEvidence(claim.evidenceHash as `0x${string}`)
   if (!record) {
     return NextResponse.json(
       {
@@ -300,7 +300,7 @@ export async function POST(req: Request) {
   // 11) REV-017: seed the policy's duplicate-evidence set with hashes already
   //     attested for OTHER claims. The same public evidence hash used by a
   //     second claim is rejected as DUPLICATE_EVIDENCE instead of passing.
-  const seenHashes = getSeenEvidenceHashes(claimId.toString())
+  const seenHashes = await getSeenEvidenceHashes(claimId.toString())
 
   // 12) REV-005 rounds 3/4: the claim budget is consumed only AFTER the
   //     authorization verified (invalid signatures cannot burn a known

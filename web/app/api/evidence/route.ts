@@ -236,11 +236,18 @@ export async function POST(req: Request) {
     coverageId: coverageId.toString(),
   })
   if (!stored.ok) {
-    // write_failed is a 5xx (transient, retryable). conflict/full are 409:
-    // the record is immutable or the store is full.
-    if (stored.code === "write_failed") {
+    // write_failed/unavailable are 5xx (transient, retryable). conflict is a
+    // 409 (immutable). "full" is a server-capacity condition: 503, and the
+    // client must NOT treat it as a successful attestation.
+    if (stored.code === "write_failed" || stored.code === "unavailable") {
       return NextResponse.json(
         { error: "evidence_store_failed", message: stored.reason, evidenceHash: evidenceContentHash(content) },
+        { status: 503 },
+      )
+    }
+    if (stored.code === "full") {
+      return NextResponse.json(
+        { error: "evidence_store_full", message: stored.reason, evidenceHash: evidenceContentHash(content) },
         { status: 503 },
       )
     }
@@ -291,16 +298,18 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "rate_limited", message: "Too many requests." }, { status: 429 })
   }
 
-  const record = getEvidenceByClaim(coverageId.toString(), claimId.toString())
+  const record = await getEvidenceByClaim(coverageId.toString(), claimId.toString())
   if (!record) {
     return NextResponse.json({ attested: false, coverageId: coverageId.toString(), claimId: claimId.toString() })
   }
+  // Round 5: do NOT return the raw evidence content to unauthenticated
+  // callers. The browser only needs the attested flag (+ hash + derived
+  // summary) to re-enable evaluation; the content itself stays server-side.
   return NextResponse.json({
     attested: true,
     coverageId: coverageId.toString(),
     claimId: claimId.toString(),
     evidenceHash: evidenceContentHash(record.content),
-    content: record.content,
     derived: record.derived,
     submittedBy: record.submittedBy,
     submittedAt: record.submittedAt,

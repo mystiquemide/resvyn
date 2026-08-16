@@ -4,10 +4,13 @@ This file records how each finding from the review in `CODE_REVIEW.md`
 (PR #1) was addressed, plus the round-2 re-audit findings on PR #2
 (REV-001r2, REV-002r2, REV-005r2, REV-007r2, REV-009r2, REV-013r2, and the
 Paymaster log item), the round-3 findings on head ef58d71 (REV-001r3,
-REV-016, REV-017, REV-002r3, REV-005r3, durable evidence storage), and the
+REV-016, REV-017, REV-002r3, REV-005r3, durable evidence storage), the
 round-4 findings on head bb9a4d2 (evidence recovery, fail-closed
 persistence, budget ordering, anonymous per-claim exhaustion, build
-tracing). Each entry lists the fix and its verification.
+tracing), and the round-5 findings on head 913bfbd (pre-intake reload
+recovery, cold-start read init, concurrent-write safety, unauthenticated
+GET exposure, load-failure fail-closed, 409 classification, bounded rate
+limit buckets). Each entry lists the fix and its verification.
 
 ## High
 
@@ -74,39 +77,51 @@ Round 3 changes WHAT is verified, not just WHO signs:
   disabled until the operator pins the expected signer. The gate useMemo
   dependency array now includes `signerOk`.
 
-### REV-016 round 4 (recovery): Evidence snapshot is recoverable after reload — FIXED
-- **Server-side rehydration:** new `GET /api/evidence?coverageId&claimId`
-  returns the stored record (attested flag, content, derived checks) for a
-  claim. `AppConsole` queries it whenever the claim references change, so
+### REV-016 round 4 (recovery): Evidence snapshot is recoverable after reload — FIXED (rounds 4/5)
+- **Server-side rehydration:** `GET /api/evidence?coverageId&claimId`
+  returns the stored record status (attested flag, hash, derived checks) for
+  a claim. `AppConsole` queries it whenever the claim references change, so
   after a reload the panel re-enables Evaluate from the server-owned record
   instead of stranding the flow.
-- **409 recovery:** when attestation returns `evidence_conflict` (a previous
-  intake succeeded before a reload), the UI treats the claim as attested and
-  enables Evaluate.
+- **409 recovery:** when attestation returns `evidence_conflict` for the
+  EXACT attested hash, the UI treats the claim as attested and enables
+  Evaluate.
+- **Pre-intake reload (round 5):** the exact snapshot committed at openClaim
+  is persisted to localStorage keyed by
+  `resvyn:evidence:<chain>:<verifier>:<coverageId>:<claimId>`, so a reload
+  between openClaim and attestation still has the original content and can
+  attest it (no stranded claim, no locked reserve).
 - **Stable snapshot:** the evidence content is still built ONCE at claim
   opening (issuedAt fixed at snapshot time) and reused for attestation, so
   the on-chain hash and the attested content can never drift.
 - Tests: `route.test.ts` — GET reports attested=false with no record,
-  attested=true with content after intake, claim-bound lookup (same hash on
-  a different claim reports unattested).
+  attested=true with hash/derived after intake, claim-bound lookup (same
+  hash on a different claim reports unattested).
 
-### REV-017: Evidence records are not claim-bound — FIXED (round 3, extended in round 4)
+### REV-017: Evidence records are not claim-bound — FIXED (round 3, extended in rounds 4/5)
 - Records carry `claimId`/`coverageId`; `/api/evaluate` refuses
   `evidence_claim_mismatch` for cross-claim reuse, and `getSeenEvidenceHashes`
   seeds the policy's duplicate-evidence set per claim.
 - Round 4: `getEvidenceByClaim()` + the claim index make the store
   queryable by claim for rehydration.
+- Round 5: reads are async and always initialize the store first, so a
+  cold-start /api/evaluate sees persisted records without requiring a prior
+  write.
 
-### Persistence round 4 (fail-closed): an unwritable store never reports success — FIXED
-- `putEvidence` is now DISK-FIRST: the record is written and atomically
-  renamed on disk BEFORE the in-memory write is committed. A failed disk
-  write returns `write_failed` and stores nothing; the route answers
-  503 `evidence_store_failed` (retryable) instead of 200.
-- The filesystem half moved to `web/lib/evidenceFs.ts`, imported
-  dynamically, so the store path stays runtime-configurable without
-  Turbopack tracing the whole project.
-- Test: a store path whose parent is a file returns 503 and stores nothing;
-  the same request succeeds once the store is healthy again.
+### Persistence round 4 (fail-closed): an unwritable store never reports success — FIXED (rounds 4/5)
+- `putEvidence` is DISK-FIRST: the record is written and atomically renamed
+  on disk BEFORE the in-memory commit. A failed disk write returns
+  `write_failed` and stores nothing; the route answers 503
+  `evidence_store_failed` (retryable) instead of 200.
+- Round 5: writes are SERIALIZED through a promise chain so two concurrent
+  intakes cannot overwrite each other's acknowledged records; a store that
+  FAILS TO LOAD (corrupt/missing) is unavailable — reads return nothing and
+  writes are refused (503 `evidence_store_failed`), so a corrupt file is
+  never silently replaced by an empty store.
+- The filesystem half lives in `web/lib/evidenceFs.ts`, imported dynamically
+  (store path stays runtime-configurable, no whole-project build tracing).
+- Tests: 503 on unwritable store then successful retry; corrupt store file
+  -> 503, file not overwritten, reads fail closed.
 
 ### REV-003: Coverage expiry is stored but never enforced or released — FIXED (round 1, unchanged)
 - `contracts/WarrantyReserve.sol`: `openClaim` reverts `CoverageAlreadyExpired`
@@ -167,6 +182,27 @@ Round 3 changes WHAT is verified, not just WHO signs:
 - The store's fs usage moved into `web/lib/evidenceFs.ts`, imported
   dynamically, so the runtime-configurable store path no longer makes
   Turbopack trace the whole project. Production build is warning-free.
+
+### Unauthenticated GET exposure (round 5, high): raw evidence is not leaked — FIXED
+- `GET /api/evidence` now returns only the attested flag, the evidence
+  hash, and the derived summary (productMatches/receiptMatches) — never the
+  raw content (product note, receipt note, damage description, amount).
+  Browser rehydration needs only the flag; the content stays server-side
+  (and in the claimant's localStorage snapshot).
+
+### 409 classification (round 5, medium): unrelated 409s are not attestation success — FIXED
+- The evidence route now distinguishes: `conflict` (immutable, already
+  stored) -> 409 `evidence_conflict`; `full` (store capacity) -> 503
+  `evidence_store_full`; `write_failed`/`unavailable` -> 503
+  `evidence_store_failed`. The client treats ONLY a 409
+  `evidence_conflict` whose `evidenceHash` equals the hash it attested as
+  "already attested"; every other 409/503 is a real failure.
+
+### Rate-limit bucket growth (round 5, medium): buckets are bounded — FIXED
+- `web/lib/rateLimit.ts`: once the bucket map exceeds 10,000 entries,
+  expired windows are swept before the next hit; an all-live pathological
+  map drops the oldest half. The map can no longer grow without bounds.
+- Test: 10,050 unique clients do not leak memory; expired keys are reusable.
 
 ### REV-006: Groq/provider failures fail open to APPROVE — FIXED
 - `web/lib/groqBrain.ts`: any provider failure (HTTP, timeout, malformed,
@@ -263,7 +299,7 @@ node --test --import tsx parity/evaluator.parity.test.ts   # 7 passing
 cd web && npm ci
 npm run lint                                               # 0 errors
 npm run typecheck                                          # clean
-npm test                                                   # 52 passing
+npm test                                                   # 54 passing
 npm run build                                              # production build, warning-free
 npm audit --omit=dev                                       # 0 vulnerabilities
 ```
