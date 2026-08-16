@@ -23,11 +23,18 @@ jobs:
           npm ci --no-audit --no-fund
           npm run typecheck
           npm run build
-      - name: Package source for deployment
+      - name: Package clean source for deployment
         uses: actions/upload-artifact@v4
         with:
           name: resvyn-web
-          path: web
+          path: |
+            web/**
+            !web/node_modules/**
+            !web/.next/**
+            !web/data/**
+            !web/.env
+            !web/.env.*
+            web/.env.example
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
