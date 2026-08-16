@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { network } from "hardhat";
-import { parseEther } from "viem";
+import { keccak256, parseEther, stringToHex } from "viem";
 
 const ZERO_HASH = `0x${"00".repeat(32)}` as const;
+const EMPTY_COMMITMENT_HASH = keccak256(stringToHex("resvyn-empty"));
 const PRODUCT_HASH = `0x${"11".repeat(32)}` as const;
 const RECEIPT_HASH = `0x${"22".repeat(32)}` as const;
 const FUTURE_EXPIRY = 2_000_000_000n;
@@ -38,6 +39,22 @@ describe("WarrantyReserve hardening", async function () {
     assert.equal(await reserve.read.coverageCount(), 0n);
   });
 
+  it("refuses the UI's empty product placeholder commitment", async function () {
+    const { claimant, reserve } = await setup();
+    await viem.assertions.revertWithCustomError(
+      reserve.write.issueCoverage([
+        claimant,
+        EMPTY_COMMITMENT_HASH,
+        RECEIPT_HASH,
+        parseEther("0.1"),
+        FUTURE_EXPIRY,
+      ]),
+      reserve,
+      "ZeroProductHash",
+    );
+    assert.equal(await reserve.read.coverageCount(), 0n);
+  });
+
   it("refuses coverage without a receipt commitment", async function () {
     const { claimant, reserve } = await setup();
     await viem.assertions.revertWithCustomError(
@@ -45,6 +62,22 @@ describe("WarrantyReserve hardening", async function () {
         claimant,
         PRODUCT_HASH,
         ZERO_HASH,
+        parseEther("0.1"),
+        FUTURE_EXPIRY,
+      ]),
+      reserve,
+      "ZeroReceiptHash",
+    );
+    assert.equal(await reserve.read.coverageCount(), 0n);
+  });
+
+  it("refuses the UI's empty receipt placeholder commitment", async function () {
+    const { claimant, reserve } = await setup();
+    await viem.assertions.revertWithCustomError(
+      reserve.write.issueCoverage([
+        claimant,
+        PRODUCT_HASH,
+        EMPTY_COMMITMENT_HASH,
         parseEther("0.1"),
         FUTURE_EXPIRY,
       ]),
