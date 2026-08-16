@@ -1,4 +1,4 @@
-import { recoverMessageAddress } from "viem"
+import { getAddress, recoverMessageAddress } from "viem"
 import { evidenceContentHash, type EvidenceContent } from "./evidenceContent"
 
 /*
@@ -22,6 +22,10 @@ import { evidenceContentHash, type EvidenceContent } from "./evidenceContent"
  * A caller who knows only public claim ids cannot forge either attestation;
  * a beneficiary cannot alter facts between intake and evaluation; and the
  * evaluate request itself carries no beneficiary-chosen settlement facts.
+ *
+ * The verifier is canonicalized with viem getAddress() before it enters either
+ * signed message. This keeps browser and external integrations byte-identical
+ * even when one caller starts from a lowercase address string.
  */
 
 export const ATTESTATION_MAX_AGE_SEC = 5 * 60
@@ -47,7 +51,7 @@ export function intakeMessage(a: EvidenceIntakeAttestation): string {
   return [
     "resvyn:evidence",
     String(a.chainId),
-    a.verifier,
+    getAddress(a.verifier),
     a.coverageId,
     a.claimId,
     a.evidenceHash,
@@ -103,9 +107,6 @@ export async function verifyEvidenceIntake(
     )
   }
 
-  // The content must commit to exactly the on-chain hash: the server recomputes
-  // the canonical content hash and compares. This is what makes the on-chain
-  // hash a verifiable commitment to the server-seen content.
   const contentHash = evidenceContentHash(att.content)
   if (contentHash.toLowerCase() !== opts.onChainEvidenceHash.toLowerCase()) {
     throw new AttestationError(
@@ -144,7 +145,7 @@ export function evaluateMessage(a: EvaluateAttestation): string {
   return [
     "resvyn:evaluate",
     String(a.chainId),
-    a.verifier,
+    getAddress(a.verifier),
     a.coverageId,
     a.claimId,
     String(a.timestamp),
