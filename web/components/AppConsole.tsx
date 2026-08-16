@@ -51,6 +51,7 @@ import {
   warrantyReserveAbi,
 } from "@/lib/chain"
 import { formatBOT, parseBOT, shortAddr } from "@/lib/format"
+import { apiUrl } from "@/lib/apiBase"
 import { evidenceContentHash, type EvidenceContent } from "@/lib/evidenceContent"
 import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
 
@@ -580,7 +581,7 @@ export default function AppConsole() {
       }
       // Server attested flag (post-intake reload recovery).
       try {
-        const res = await fetch(`/api/evidence?coverageId=${encodeURIComponent(evalCoverageId)}&claimId=${encodeURIComponent(evalClaimId)}`)
+        const res = await fetch(`${apiUrl("/api/evidence")}?coverageId=${encodeURIComponent(evalCoverageId)}&claimId=${encodeURIComponent(evalClaimId)}`)
         const body = await res.json()
         if (cancelled || !body.attested) return
         setEvidenceAttested(true)
@@ -676,7 +677,7 @@ export default function AppConsole() {
       })
       const signature = await walletClient.signMessage({ message: msg })
       setAction("evaluate", { status: "pending", message: "Submitting evidence to the server…" })
-      const res = await fetch("/api/evidence", {
+      const res = await fetch(apiUrl("/api/evidence"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -746,7 +747,7 @@ export default function AppConsole() {
       })
       const signature = await walletClient.signMessage({ message: msg })
       setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
-      const res = await fetch("/api/evaluate", {
+      const res = await fetch(apiUrl("/api/evaluate"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
