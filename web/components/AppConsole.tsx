@@ -40,12 +40,19 @@ import StatusDot from "./StatusDot"
 import {
   APP_CHAIN,
   APP_CONTRACT_ADDRESS,
+  DEPLOY_START_BLOCK,
+  EXPECTED_EVALUATOR,
   PROOF,
+  evaluatorSignerMatches,
   explorerTx,
   isAppContractReady,
+  isArchivedProofInstance,
+  isOperationalDeployment,
   warrantyReserveAbi,
 } from "@/lib/chain"
 import { formatBOT, parseBOT, shortAddr } from "@/lib/format"
+import { evidenceContentHash, type EvidenceContent } from "@/lib/evidenceContent"
+import { evaluateMessage, intakeMessage } from "@/lib/evaluateAuth"
 
 type Tone = "ok" | "idle" | "pending" | "warn" | "fail"
 type ActionKey = "deposit" | "issue" | "open" | "evaluate" | "resolve" | "withdraw" | "probe"
@@ -104,7 +111,7 @@ type SignedDecision = {
 }
 
 const ZERO_TX: TxState = { status: "idle" }
-const COVERAGE_STATUS = ["None", "Active"] as const
+const COVERAGE_STATUS = ["None", "Active", "Expired"] as const
 const CLAIM_STATUS = ["None", "Open", "Approved", "Rejected"] as const
 
 const inputStyle: React.CSSProperties = {
@@ -189,7 +196,10 @@ export default function AppConsole() {
   })
 
   const onAppChain = chainId === APP_CHAIN.id
-  const canWrite = Boolean(isConnected && onAppChain && deployed && contract && address)
+  // REV-002: writes are enabled only for a manifest-verified operational
+  // deployment. The default archived proof instance is strictly read-only:
+  // no deposit, issuance, claim, settlement, or withdrawal against it.
+  const operational = isOperationalDeployment(APP_CONTRACT_ADDRESS)
 
   const [reserve, setReserve] = useState({ balance: 0n, locked: 0n, free: 0n })
   const [evaluator, setEvaluator] = useState<Address | null>(null)
@@ -229,9 +239,47 @@ export default function AppConsole() {
   const [signed, setSigned] = useState<SignedDecision | null>(null)
   const [noWallet, setNoWallet] = useState(false)
   const [instance, setInstance] = useState({ balance: 0n, locked: 0n, free: 0n, nonceUsed: false })
+  // REV-001 round 3: the evidence content is built ONCE when the claim is
+  // opened and the exact snapshot is kept in state, so the hash committed
+  // on-chain is byte-identical to the content attested at /api/evidence
+  // (REV-016). issuedAt is fixed at snapshot time - never recomputed per
+  // call - so a one-second drift cannot break the commitment.
+  const [evidenceSnapshot, setEvidenceSnapshot] = useState<{
+    content: EvidenceContent
+    hash: Hex
+    claimId: string
+    coverageId: string
+  } | null>(null)
+
+  // REV-016: the attested flag belongs to a specific claim. Reset it whenever
+  // the claim/coverage references or the evidence fields change, so a stale
+  // "attested" state can never unlock evaluation for different inputs.
+  // NOTE: evidenceSnapshot is deliberately NOT a dependency - rehydration
+  // (round 4) sets the snapshot and the attested flag together.
+  const [evidenceAttested, setEvidenceAttested] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setEvidenceAttested(false)
+      setSigned(null)
+    }, 0)
+    return () => clearTimeout(t)
+  }, [evalCoverageId, evalClaimId, productNote, receiptNote, evidenceNote, requestedAmt, signals.damageEligible, signals.evidenceComplete, signals.fileIntegrityOk])
+
+  // REV-002 round 2: when the operator pinned an expected evaluator signer,
+  // the live on-chain signer must match it or the app renders read-only.
+  // REV-002 round 3: a pinned evaluator is REQUIRED for writes - without
+  // NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR, evaluatorSignerMatches returns
+  // false, so no deposit/issuance can happen before evaluator compatibility
+  // is established.
+  const signerOk = evaluatorSignerMatches(EXPECTED_EVALUATOR, evaluator ?? undefined)
+  const canWrite = Boolean(operational && signerOk && isConnected && onAppChain && deployed && contract && address)
 
   useEffect(() => {
-    if (address && !claimant) setClaimant(address)
+    if (address && !claimant) {
+      // Defer so the state write is not synchronous inside the effect.
+      const t = setTimeout(() => setClaimant(address), 0)
+      return () => clearTimeout(t)
+    }
   }, [address, claimant])
 
   const pushLog = useCallback((entry: Omit<LogEntry, "id">) => {
@@ -266,6 +314,12 @@ export default function AppConsole() {
         nonceUsed: Boolean(nonceUsed),
       })
 
+      // REV-009 round 2: rows are ALWAYS re-read on refresh. Claim status and
+      // paidAmount change on settlement without claimCount changing, and
+      // coverage status changes on expiry without coverageCount changing, so
+      // a counts-based cache would show stale state. Reads stay bounded: at
+      // most 12 coverage rows + 12 claim rows, and the log scan below is
+      // limited to the deployment start block.
       const lastCov = Number(covCount > 12n ? 12n : covCount)
       const covRows: CoverageRow[] = []
       for (let i = 0; i < lastCov; i++) {
@@ -307,8 +361,11 @@ export default function AppConsole() {
       }
       setClaims(claimRows)
 
+      // REV-009: bound the historical log scan to this deployment's start
+      // block instead of rescanning the whole chain from block 0. Only the
+      // most recent events are needed for the session log.
       try {
-        const raw = await publicClient.getLogs({ address: contract, fromBlock: 0n, toBlock: "latest" })
+        const raw = await publicClient.getLogs({ address: contract, fromBlock: DEPLOY_START_BLOCK, toBlock: "latest" })
         const decoded = parseEventLogs({ abi: warrantyReserveAbi, logs: raw })
         const fromChain: LogEntry[] = decoded
           .slice(-20)
@@ -337,7 +394,10 @@ export default function AppConsole() {
   }, [publicClient, contract, deployed, address])
 
   useEffect(() => {
-    void refresh()
+    // Defer the first refresh so its synchronous setReading(true) does not
+    // run inside the effect body (react-hooks/set-state-in-effect).
+    const t = setTimeout(() => void refresh(), 0)
+    return () => clearTimeout(t)
   }, [refresh])
 
   async function addAppChain() {
@@ -412,7 +472,25 @@ export default function AppConsole() {
         const opened = decoded.find((e) => e.eventName === "ClaimOpened")
         if (opened && "claimId" in opened.args) {
           const id = String(opened.args.claimId)
+          const coverageId = String(opened.args.coverageId ?? openCoverageId)
           setEvalClaimId(id)
+          // REV-016: bind the committed evidence snapshot to the REAL opened
+          // claim id so attestation can never target a different claim, and
+          // persist it to localStorage so a pre-intake reload can still
+          // attest the exact same content (round 5 recovery).
+          setEvidenceSnapshot((prev) => {
+            if (!prev) return prev
+            const bound = { ...prev, claimId: id, coverageId }
+            try {
+              localStorage.setItem(
+                `resvyn:evidence:${APP_CHAIN.id}:${contract}:${coverageId}:${id}`,
+                JSON.stringify({ content: bound.content, hash: bound.hash }),
+              )
+            } catch {
+              /* localStorage unavailable; the in-memory snapshot still works */
+            }
+            return bound
+          })
         }
       }
       await refresh()
@@ -474,6 +552,66 @@ export default function AppConsole() {
     )
   }
 
+  // REV-016 (round 4/5): after a reload the in-memory snapshot is gone.
+  // 1) localStorage: the EXACT snapshot committed at openClaim survives
+  //    reloads, so a pre-intake reload can still attest the same content.
+  // 2) GET /api/evidence: the attested flag re-enables Evaluate for claims
+  //    whose intake already succeeded. The server no longer returns raw
+  //    content (round 5); the localStorage copy covers the display side.
+  useEffect(() => {
+    let cancelled = false
+    async function rehydrate() {
+      if (!deployed || !evalCoverageId || !evalClaimId) return
+      const snapshotKey = `resvyn:evidence:${APP_CHAIN.id}:${contract ?? APP_CONTRACT_ADDRESS}:${evalCoverageId}:${evalClaimId}`
+      // Local snapshot (pre-intake reload recovery).
+      try {
+        const raw = localStorage.getItem(snapshotKey)
+        if (raw && !cancelled) {
+          const saved = JSON.parse(raw) as { content: EvidenceContent; hash: `0x${string}` }
+          setEvidenceSnapshot({
+            content: saved.content,
+            hash: saved.hash,
+            claimId: String(BigInt(evalClaimId)),
+            coverageId: String(BigInt(evalCoverageId)),
+          })
+        }
+      } catch {
+        // localStorage unavailable/private mode: rely on the server flag.
+      }
+      // Server attested flag (post-intake reload recovery).
+      try {
+        const res = await fetch(`/api/evidence?coverageId=${encodeURIComponent(evalCoverageId)}&claimId=${encodeURIComponent(evalClaimId)}`)
+        const body = await res.json()
+        if (cancelled || !body.attested) return
+        setEvidenceAttested(true)
+        setAction("evaluate", { status: "idle", message: "Evidence already attested server-side; evaluation is enabled." })
+      } catch {
+        // Offline / transient: leave the panel as-is; attest will surface errors.
+      }
+    }
+    void rehydrate()
+    return () => {
+      cancelled = true
+    }
+  }, [deployed, evalCoverageId, evalClaimId, contract])
+
+  // REV-016 round 3: the evidence content is built ONCE when the claim is
+  // opened and the exact snapshot is kept in state, so the hash committed
+  // on-chain is byte-identical to the content attested later. productMatches
+  // is NOT a client field anymore: the server derives it.
+  function currentEvidenceContent(): EvidenceContent {
+    return {
+      productNote: productNote.trim() || "resvyn-empty",
+      receiptNote: receiptNote.trim() || "resvyn-empty",
+      damageDescription: evidenceNote.trim(),
+      damageEligible: signals.damageEligible,
+      evidenceComplete: signals.evidenceComplete,
+      fileIntegrityOk: signals.fileIntegrityOk,
+      requestedAmountWei: requestedAmt.trim() === "" ? "0" : parseBOT(requestedAmt).toString(),
+      issuedAt: Math.floor(Date.now() / 1000) - 3600,
+    }
+  }
+
   async function onOpen() {
     if (!contract) return
     let coverageId: bigint
@@ -487,50 +625,146 @@ export default function AppConsole() {
       setAction("open", { status: "failed", message: "Coverage id must be a whole number, like 1 or 2." })
       return
     }
+    // REV-016: build the content ONCE, keep the exact snapshot in state, and
+    // open the claim with its hash. Attestation later reuses this snapshot so
+    // the committed hash and the attested content can never drift.
+    const content = currentEvidenceContent()
+    const hash = evidenceContentHash(content)
+    setEvidenceSnapshot({ content, hash, claimId: String(openCoverageId), coverageId: String(openCoverageId) })
     await send("open", "Open claim", () =>
       writeContract({
         address: contract,
         abi: warrantyReserveAbi,
         functionName: "openClaim",
-        args: [coverageId, hashText(evidenceNote)],
+        args: [coverageId, hash],
       }),
     )
   }
 
-  async function onEvaluate() {
-    setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
-    setSigned(null)
+  // REV-001 round 3 step 1: attest the evidence content to the server. The
+  // claimant/merchant signs the intake message; the server verifies the
+  // content hashes to the on-chain claim.evidenceHash, derives product/
+  // receipt matches against the coverage's on-chain hashes, and stores the
+  // record server-side (first write wins, claim-bound).
+  async function onAttestEvidence() {
+    if (!walletClient || !address) {
+      setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to attest evidence." })
+      return
+    }
+    // REV-016: attest the EXACT snapshot that was committed when the claim
+    // was opened. Rebuilding the content now could drift (issuedAt, notes)
+    // and produce a hash that no longer matches the on-chain commitment.
+    if (!evidenceSnapshot) {
+      setAction("evaluate", { status: "failed", message: "Open the claim first: the evidence snapshot committed on-chain is required for attestation." })
+      return
+    }
+    setAction("evaluate", { status: "pending", message: "Waiting for your evidence signature…" })
     try {
-      let requested: bigint
-      try {
-        requested = parseBOT(requestedAmt)
-      } catch (err) {
-        setAction("evaluate", { status: "failed", message: err instanceof Error ? err.message : "Enter a valid amount in BOT." })
-        return
-      }
-      const res = await fetch("/api/evaluate", {
+      const coverageId = String(BigInt(evalCoverageId))
+      const claimId = String(BigInt(evalClaimId))
+      const content = evidenceSnapshot.content
+      const evidenceHash = evidenceSnapshot.hash
+      const timestamp = Math.floor(Date.now() / 1000)
+      const msg = intakeMessage({
+        chainId: APP_CHAIN.id,
+        verifier: contract as Address,
+        coverageId,
+        claimId,
+        evidenceHash,
+        content,
+        timestamp,
+      })
+      const signature = await walletClient.signMessage({ message: msg })
+      setAction("evaluate", { status: "pending", message: "Submitting evidence to the server…" })
+      const res = await fetch("/api/evidence", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          coverageId: evalCoverageId,
-          claimId: evalClaimId,
-          evidence: {
-            productMatches: signals.productMatches,
-            damageEligible: signals.damageEligible,
-            evidenceComplete: signals.evidenceComplete,
-            fileIntegrityOk: signals.fileIntegrityOk,
-            requestedAmountWei: requested.toString(),
-          },
+          coverageId,
+          claimId,
+          evidence: content,
+          signer: address,
+          signature,
+          timestamp,
         }),
       })
       const body = await res.json()
       if (!res.ok) {
-        const msg =
+        // REV-016 round 4: a 409 evidence_conflict means a previous intake
+        // already succeeded (e.g. before a reload). Recover: treat the claim
+        // as attested and enable Evaluate instead of stranding the flow.
+        // Round 5: ONLY an evidence_conflict for the EXACT hash we attested
+        // counts as success - store-full, claim-closed, or other 409s are
+        // real failures, not attestations.
+        if (
+          res.status === 409 &&
+          body.error === "evidence_conflict" &&
+          typeof body.evidenceHash === "string" &&
+          body.evidenceHash.toLowerCase() === evidenceSnapshot.hash.toLowerCase()
+        ) {
+          setEvidenceAttested(true)
+          setAction("evaluate", { status: "confirmed", message: "Evidence was already attested server-side; evaluation is enabled." })
+          pushLog({ event: "Evidence already attested", detail: `hash ${body.evidenceHash.slice(0, 12)}`, tone: "ok" })
+          return
+        }
+        const msg2 =
+          res.status === 429
+            ? "Too many requests. Wait a minute, then try again."
+            : body.message || body.error || "Evidence refused"
+        setAction("evaluate", { status: "failed", message: msg2 })
+        pushLog({ event: "Evidence refused", detail: msg2, tone: "warn" })
+        return
+      }
+      setEvidenceAttested(true)
+      setAction("evaluate", { status: "confirmed", message: "Evidence attested server-side" })
+      pushLog({ event: "Evidence attested", detail: `hash ${body.evidenceHash.slice(0, 12)}…`, tone: "ok" })
+    } catch (err) {
+      setAction("evaluate", { status: "failed", message: describeError(err) })
+    }
+  }
+
+  // REV-001 round 2 step 2: request evaluation. The body carries ONLY the
+  // claim references and an authorization signature - no evidence fields, no
+  // amount. The server derives everything from its stored evidence record.
+  async function onEvaluate() {
+    if (!walletClient || !address) {
+      setAction("evaluate", { status: "failed", message: "Connect a wallet on BOT Chain Mainnet to evaluate." })
+      return
+    }
+    setAction("evaluate", { status: "pending", message: "Waiting for your authorization signature…" })
+    setSigned(null)
+    try {
+      const coverageId = String(BigInt(evalCoverageId))
+      const claimId = String(BigInt(evalClaimId))
+      const timestamp = Math.floor(Date.now() / 1000)
+      const msg = evaluateMessage({
+        chainId: APP_CHAIN.id,
+        verifier: contract as Address,
+        coverageId,
+        claimId,
+        timestamp,
+      })
+      const signature = await walletClient.signMessage({ message: msg })
+      setAction("evaluate", { status: "pending", message: "Asking the evaluator…" })
+      const res = await fetch("/api/evaluate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          coverageId,
+          claimId,
+          signer: address,
+          signature,
+          timestamp,
+        }),
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        const msg2 =
           res.status === 429
             ? "Too many evaluate requests. Wait a minute, then try again."
             : body.message || body.error || "Evaluator refused"
-        setAction("evaluate", { status: "failed", message: msg })
-        pushLog({ event: "Evaluator refused", detail: msg, tone: "warn" })
+        setAction("evaluate", { status: "failed", message: msg2 })
+        pushLog({ event: "Evaluator refused", detail: msg2, tone: "warn" })
         return
       }
       const d = body.decision
@@ -655,6 +889,28 @@ export default function AppConsole() {
   }
 
   const gate = useMemo(() => {
+    // REV-002: the archived proof instance is read-only, whatever the wallet.
+    if (deployed && isArchivedProofInstance(APP_CONTRACT_ADDRESS)) {
+      return {
+        tone: "warn" as Tone,
+        title: "This is the archived proof instance (read-only)",
+        body:
+          "The configured contract is the recorded Mainnet proof deployment, whose evaluator signer is no longer in use. Deposit, issuance, claim, settlement, and withdrawal are disabled so no real BOT can be locked without a working settlement path. Verify the proof on /proof. Point NEXT_PUBLIC_RESVYN_ADDRESS at a verified operational deployment and set NEXT_PUBLIC_RESVYN_OPERATIONAL=1 to enable writes.",
+      }
+    }
+    // REV-002 round 2: the pinned expected evaluator signer must match the
+    // live on-chain signer, or the deployment cannot settle anything.
+    // REV-002 round 3: a pinned evaluator manifest is REQUIRED — without
+    // NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR the app is read-only too.
+    if (deployed && !signerOk) {
+      return {
+        tone: "warn" as Tone,
+        title: EXPECTED_EVALUATOR ? "Evaluator signer mismatch (read-only)" : "Evaluator signer not pinned (read-only)",
+        body: EXPECTED_EVALUATOR
+          ? "This deployment's on-chain evaluator signer does not match NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR, so no decision signed here could ever settle. All writes are disabled until the deployment manifest is corrected."
+          : "No evaluator signer is pinned (NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is unset), so evaluator compatibility cannot be verified. All writes are disabled until the operator pins the expected signer.",
+      }
+    }
     if (!deployed) {
       return {
         tone: "warn" as Tone,
@@ -677,7 +933,7 @@ export default function AppConsole() {
       }
     }
     return null
-  }, [deployed, isConnected, onAppChain, chainId])
+  }, [deployed, isConnected, onAppChain, chainId, operational, signerOk])
 
   const busy = Object.values(txs).some((t) => t.status === "pending") || connecting || switching
 
@@ -847,61 +1103,144 @@ export default function AppConsole() {
             </div>
           </ActionCard>
 
-          <div className="card" style={{ padding: 22 }}>
-            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <span
+          {operational ? (
+            <div className="card" style={{ padding: 22 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    width: 38,
+                    height: 38,
+                    borderRadius: 11,
+                    background: "var(--color-inset)",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flex: "none",
+                  }}
+                >
+                  <Cpu size={18} color="var(--color-forest)" />
+                </span>
+                <div>
+                  <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
+                  <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
+                    Only the claim claimant or coverage merchant can evaluate: you sign the evidence
+                    fields with your wallet, the server verifies the signature against on-chain
+                    ownership, runs the bounded policy, and returns a signed decision to relay.
+                  </p>
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Coverage id" htmlFor="eval-coverage-id">
+                  <input id="eval-coverage-id" style={inputStyle} value={evalCoverageId} onChange={(e) => setEvalCoverageId(e.target.value)} inputMode="numeric" placeholder="1" />
+                </Field>
+                <Field label="Claim id" htmlFor="eval-claim-id">
+                  <input id="eval-claim-id" style={inputStyle} value={evalClaimId} onChange={(e) => setEvalClaimId(e.target.value)} inputMode="numeric" placeholder="1" />
+                </Field>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Requested amount (BOT)" htmlFor="requested-amt">
+                  <input id="requested-amt" style={inputStyle} value={requestedAmt} onChange={(e) => setRequestedAmt(e.target.value)} inputMode="decimal" placeholder="0.001" />
+                </Field>
+                <Field label="Evidence note (must match the claim)" htmlFor="evidence-note-eval">
+                  <input id="evidence-note-eval" style={inputStyle} value={evidenceNote} onChange={(e) => setEvidenceNote(e.target.value)} placeholder="Damage photos and receipt" />
+                </Field>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 12 }}>
+                {(
+                  [
+                    ["damageEligible", "Damage eligible (self-attested)"],
+                    ["evidenceComplete", "Evidence complete (self-attested)"],
+                    ["fileIntegrityOk", "File integrity ok (self-attested)"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.82rem", color: "var(--color-muted)" }}>
+                    <input
+                      type="checkbox"
+                      checked={signals[key]}
+                      onChange={(e) => setSignals((s) => ({ ...s, [key]: e.target.checked }))}
+                    />
+                    {label}
+                  </label>
+                ))}
+                <span style={{ fontSize: "0.78rem", color: "var(--color-muted-2)" }}>
+                  Product/receipt match is derived server-side from the coverage&apos;s on-chain hashes.
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+                <button className="btn btn-primary" onClick={() => void onAttestEvidence()} disabled={!canWrite || busy} style={{ padding: "0.6rem 1rem" }}>
+                  {txs.evaluate.status === "pending" ? <Loader2 size={15} /> : null}
+                  {evidenceAttested ? "Re-attest evidence" : "Attest evidence to server"}
+                </button>
+                <button className="btn btn-ghost" onClick={() => void onEvaluate()} disabled={!canWrite || busy || !evidenceAttested} style={{ padding: "0.6rem 1rem" }}>
+                  {txs.evaluate.status === "pending" ? <Loader2 size={15} /> : null}
+                  Evaluate
+                </button>
+                <button className="btn btn-ghost" onClick={() => void onResolve()} disabled={!canWrite || busy || !signed} style={{ padding: "0.6rem 1rem" }}>
+                  {txs.resolve.status === "pending" ? <Loader2 size={15} /> : null}
+                  Resolve with decision
+                </button>
+                {signed && <DecisionCard signed={signed} />}
+              </div>
+              <TxLine tx={txs.evaluate} />
+              <TxLine tx={txs.resolve} />
+            </div>
+          ) : (
+            <div className="card" style={{ padding: 22 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    width: 38,
+                    height: 38,
+                    borderRadius: 11,
+                    background: "var(--color-inset)",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flex: "none",
+                  }}
+                >
+                  <Cpu size={18} color="var(--color-forest)" />
+                </span>
+                <div>
+                  <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
+                  <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
+                    Live read of claim #1 on BOT Chain Mainnet. This instance already settled. A new claim cannot be paid here because the evaluator signer was bound at deploy and is no longer in use.
+                  </p>
+                </div>
+              </div>
+              <dl
                 style={{
-                  display: "inline-flex",
-                  width: 38,
-                  height: 38,
-                  borderRadius: 11,
-                  background: "var(--color-inset)",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  flex: "none",
+                  margin: "16px 0 0",
+                  display: "grid",
+                  gridTemplateColumns: "auto 1fr",
+                  columnGap: 16,
+                  rowGap: 10,
+                  fontSize: "0.95rem",
                 }}
               >
-                <Cpu size={18} color="var(--color-forest)" />
-              </span>
-              <div>
-                <div style={{ fontWeight: 600 }}>Evaluate and settle</div>
-                <p style={{ margin: "4px 0 0", fontSize: "0.86rem", color: "var(--color-muted)", lineHeight: 1.5 }}>
-                  Live read of claim #1 on BOT Chain Mainnet. This instance already settled. A new claim cannot be paid here because the evaluator signer was bound at deploy and is no longer in use.
-                </p>
-              </div>
+                {(
+                  [
+                    ["Coverage id", "1"],
+                    ["Claim id", "1"],
+                    ["Paid", "0.001 BOT"],
+                    ["Status", liveClaimLabel(claims)],
+                    ["Nonce 1", instance.nonceUsed ? "Used" : "Open"],
+                    ["Product matches", "Yes"],
+                    ["Damage eligible", "Yes"],
+                    ["Evidence complete", "Yes"],
+                  ] as const
+                ).map(([k, v]) => (
+                  <div key={k} style={{ display: "contents" }}>
+                    <dt style={{ color: "var(--color-muted)" }}>{k}</dt>
+                    <dd style={{ margin: 0, fontWeight: 600, textAlign: "right" }}>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+              <a href="/proof" className="btn btn-primary" style={{ marginTop: 16 }}>
+                Verify this payout live
+              </a>
             </div>
-            <dl
-              style={{
-                margin: "16px 0 0",
-                display: "grid",
-                gridTemplateColumns: "auto 1fr",
-                columnGap: 16,
-                rowGap: 10,
-                fontSize: "0.95rem",
-              }}
-            >
-              {(
-                [
-                  ["Coverage id", "1"],
-                  ["Claim id", "1"],
-                  ["Paid", "0.001 BOT"],
-                  ["Status", liveClaimLabel(claims)],
-                  ["Nonce 1", instance.nonceUsed ? "Used" : "Open"],
-                  ["Product matches", "Yes"],
-                  ["Damage eligible", "Yes"],
-                  ["Evidence complete", "Yes"],
-                ] as const
-              ).map(([k, v]) => (
-                <div key={k} style={{ display: "contents" }}>
-                  <dt style={{ color: "var(--color-muted)" }}>{k}</dt>
-                  <dd style={{ margin: 0, fontWeight: 600, textAlign: "right" }}>{v}</dd>
-                </div>
-              ))}
-            </dl>
-            <a href="/proof" className="btn btn-primary" style={{ marginTop: 16 }}>
-              Verify this payout live
-            </a>
-          </div>
+          )}
 
           <ActionCard
             icon={Store}
@@ -1253,6 +1592,9 @@ function summarizeEvent(name: string, args: Record<string, unknown>): string {
   }
   if (name === "ClaimRejected") {
     return `claim #${String(args.claimId)} rejected`
+  }
+  if (name === "CoverageExpired") {
+    return `coverage #${String(args.coverageId)} expired · lock ${formatBOT(args.maxPayout as bigint)} released`
   }
   return Object.entries(args)
     .filter(([, v]) => v !== undefined)

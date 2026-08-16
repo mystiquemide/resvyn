@@ -21,7 +21,7 @@ export default function TermsPage() {
             Resvyn is a software prototype built for the BOT Chain hackathon. It is not insurance, not a regulated warranty product, and not an offer of financial services.
           </p>
           <p>
-            /app can send real transactions on BOT Chain Mainnet. Native BOT you deposit can be locked or paid out by the contract. Do not send funds you cannot afford to lose.
+            /app is read-only for the recorded Mainnet proof deployment. Native BOT you might deposit can only be locked or paid out on a fresh operational deployment, and this app keeps those writes disabled until an operator explicitly enables them (NEXT_PUBLIC_RESVYN_OPERATIONAL=1). Do not send funds you cannot afford to lose.
           </p>
           <p>
             The recorded Mainnet ceremony is independently verifiable on /proof. New claim settlement on that instance requires the original evaluator signer, which is no longer in use. A later deploy would be a different contract.

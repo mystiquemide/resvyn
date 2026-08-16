@@ -71,6 +71,23 @@ import { httpJsonRpcCaller, sendSponsoredTransaction } from "./paymaster.js";
 const EXPECTED_TESTNET_CHAIN_ID = 968;
 const MAINNET_CHAIN_ID = 677;
 
+function redactUrl(url: string): string {
+  // Strip userinfo, query, and hash so credentials embedded in an operator
+  // RPC URL never reach logs or log aggregation (REV-008).
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch {
+    // Not a parseable URL: never echo any part of it. Credential-like
+    // material can hide in the first characters of a malformed string.
+    return "<unparseable url redacted>";
+  }
+}
+
 // EIP-712 domain, type, model version, and the decision result enum all live in
 // the evaluator service now (scripts/evaluator/service.ts), so the rehearsal and
 // the contract share one source of truth. APPROVE is kept here only to assert
@@ -192,10 +209,25 @@ async function main() {
         "genuinely your intent.",
     );
   }
-  if (chainId !== EXPECTED_TESTNET_CHAIN_ID && chainId !== MAINNET_CHAIN_ID) {
-    console.log(
-      `Note: connected to chain ${chainId}, which is neither BOT Testnet ` +
-        `(968) nor Mainnet (677). Proceeding (local validation node?).`,
+  // REV-008: fail closed on unknown chains. Testnet (968) is the default
+  // target, Mainnet (677) needs the explicit flag above, and any other chain
+  // (including local validation nodes) needs its own explicit opt-in via
+  // RESVYN_ALLOW_CHAIN_ID. Anything else aborts before any key is used or any
+  // deployment is attempted.
+  const explicitAllow = process.env.RESVYN_ALLOW_CHAIN_ID?.trim()
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0) ?? [];
+  const isAllowed =
+    chainId === EXPECTED_TESTNET_CHAIN_ID ||
+    chainId === MAINNET_CHAIN_ID ||
+    explicitAllow.includes(chainId);
+  if (!isAllowed) {
+    throw new Error(
+      `Refusing to run the rehearsal on chain ${chainId}. This tool deploys ` +
+        "and spends. Only BOT Testnet (968), BOT Mainnet (677, with " +
+        "RESVYN_ALLOW_MAINNET=i-understand), and explicitly opted-in local " +
+        "chains (RESVYN_ALLOW_CHAIN_ID) are supported. Nothing was sent.",
     );
   }
 
@@ -217,7 +249,7 @@ async function main() {
 
   console.log("Resvyn dress rehearsal");
   console.log(`  chainId:   ${chainId}`);
-  console.log(`  rpc:       ${rpcUrl}`);
+  console.log(`  rpc:       ${redactUrl(rpcUrl)}`);
   console.log(`  deployer/merchant/relayer: ${deployer.address}`);
   console.log(
     `  claimant (payout target):  ${claimant.address}` +
@@ -332,7 +364,9 @@ async function main() {
   let openHash: `0x${string}`;
   let sponsored = false;
   if (paymasterUrl) {
-    console.log(`      paymaster set, checking sponsorability at ${paymasterUrl}`);
+    // REV-006 (round 2): never log the paymaster URL verbatim; credentials
+    // or tokens embedded in it would reach logs and log aggregation.
+    console.log(`      paymaster set, checking sponsorability at ${redactUrl(paymasterUrl)}`);
     const openGas = await publicClient.estimateContractGas({
       address: reserveAddress,
       abi,

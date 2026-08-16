@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest"
-import { groqBrain, isGroqConfigured } from "./groqBrain"
+import { groqBrain, isGroqConfigured, GroqProviderError } from "./groqBrain"
 import { ModelDecisionSchema, type ClaimEvidence, type PolicyContext } from "./evaluator.server"
 
 const BASE_EVIDENCE: ClaimEvidence = {
@@ -50,36 +50,32 @@ describe("hard-signal gate", () => {
   })
 })
 
-describe("Groq failure fallback", () => {
-  it("falls back to the policy decision when the API returns 401", async () => {
+describe("Groq failure fails closed (REV-006)", () => {
+  it("refuses to sign when the API returns 401", async () => {
     process.env.RESVYN_GROQ_KEY = "gsk_bogus"
     const orig = globalThis.fetch
     globalThis.fetch = (async () => new Response(JSON.stringify({ error: { message: "Invalid API Key" } }), { status: 401 })) as typeof fetch
     try {
-      const d = await groqBrain(BASE_EVIDENCE, CTX)
-      expect(d.decision).toBe("APPROVE")
-      expect(d.approvedAmount).toBe(BASE_EVIDENCE.requestedAmount.toString())
-      expect(ModelDecisionSchema.safeParse(d).success).toBe(true)
+      await expect(groqBrain(BASE_EVIDENCE, CTX)).rejects.toThrow(GroqProviderError)
     } finally {
       globalThis.fetch = orig
     }
   })
 
-  it("falls back when the provider call rejects", async () => {
+  it("refuses to sign when the provider call rejects", async () => {
     process.env.RESVYN_GROQ_KEY = "gsk_bogus"
     const orig = globalThis.fetch
     globalThis.fetch = (async () => {
       throw new Error("network down")
     }) as typeof fetch
     try {
-      const d = await groqBrain(BASE_EVIDENCE, CTX)
-      expect(d.decision).toBe("APPROVE")
+      await expect(groqBrain(BASE_EVIDENCE, CTX)).rejects.toThrow(GroqProviderError)
     } finally {
       globalThis.fetch = orig
     }
   })
 
-  it("falls back when Groq returns malformed JSON", async () => {
+  it("refuses to sign when Groq returns malformed JSON", async () => {
     process.env.RESVYN_GROQ_KEY = "gsk_bogus"
     const orig = globalThis.fetch
     globalThis.fetch = (async () =>
@@ -88,8 +84,36 @@ describe("Groq failure fallback", () => {
         { status: 200 },
       )) as typeof fetch
     try {
-      const d = await groqBrain(BASE_EVIDENCE, CTX)
-      expect(d.decision).toBe("APPROVE")
+      await expect(groqBrain(BASE_EVIDENCE, CTX)).rejects.toThrow(GroqProviderError)
+    } finally {
+      globalThis.fetch = orig
+    }
+  })
+
+  it("refuses to sign when Groq output fails the schema gate", async () => {
+    process.env.RESVYN_GROQ_KEY = "gsk_bogus"
+    const orig = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: "REJECT",
+                  approvedAmount: "123", // schema-invalid: REJECT must carry 0
+                  reasonCode: "POLICY_UNCERTAIN",
+                  confidenceBand: "LOW",
+                  modelVersion: "resvyn-groq-openai/gpt-oss-120b",
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      )) as typeof fetch
+    try {
+      await expect(groqBrain(BASE_EVIDENCE, CTX)).rejects.toThrow(GroqProviderError)
     } finally {
       globalThis.fetch = orig
     }
@@ -156,37 +180,6 @@ describe("Groq failure fallback", () => {
       expect(d.approvedAmount).toBe("0")
       expect(d.reasonCode).toBe("POLICY_UNCERTAIN")
       expect(d.modelVersion).toBe("resvyn-groq-openai/gpt-oss-120b")
-      expect(ModelDecisionSchema.safeParse(d).success).toBe(true)
-    } finally {
-      globalThis.fetch = orig
-    }
-  })
-
-  it("refuses a REJECT-with-amount payload via the schema gate and falls back to policy", async () => {
-    process.env.RESVYN_GROQ_KEY = "gsk_bogus"
-    const orig = globalThis.fetch
-    globalThis.fetch = (async () =>
-      new Response(
-        JSON.stringify({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify({
-                  decision: "REJECT",
-                  approvedAmount: "123", // schema-invalid: REJECT must carry 0
-                  reasonCode: "POLICY_UNCERTAIN",
-                  confidenceBand: "LOW",
-                  modelVersion: "resvyn-groq-openai/gpt-oss-120b",
-                }),
-              },
-            },
-          ],
-        }),
-        { status: 200 },
-      )) as typeof fetch
-    try {
-      const d = await groqBrain(BASE_EVIDENCE, CTX)
-      expect(d.decision).toBe("APPROVE") // safe fallback, never a malformed signature
       expect(ModelDecisionSchema.safeParse(d).success).toBe(true)
     } finally {
       globalThis.fetch = orig
