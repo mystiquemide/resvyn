@@ -38,15 +38,15 @@ export default function Footer() {
                 { href: "/#how", label: "How it works" },
                 { href: "/demo", label: "Guided demo" },
                 { href: "/reserve", label: "Look up a reserve" },
-                { href: "/app", label: "Inspect live app" },
+                { href: "/app", label: "Launch live app" },
               ]}
             />
             <FooterCol
               title="Mainnet"
               links={[
-                { href: "/proof", label: "Verify Mainnet proof" },
+                { href: "/proof", label: "Verify current lifecycle" },
                 { href: explorerAddress(677, CURRENT_DEPLOYMENT.contract), label: "Current WarrantyReserve", external: true },
-                { href: explorerAddress(677, PROOF.contract), label: "Recorded lifecycle contract", external: true },
+                { href: explorerAddress(677, PROOF.contract), label: "Historical proof contract", external: true },
                 { href: "https://github.com/mystiquemide/resvyn", label: "Source on GitHub", external: true },
               ]}
             />
@@ -65,7 +65,7 @@ export default function Footer() {
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16, justifyContent: "space-between", alignItems: "center", fontSize: "0.82rem", color: "color-mix(in srgb, var(--color-canvas) 62%, transparent)" }}>
           <span>© 2026 Resvyn · Live on BOT Chain Mainnet, chain 677</span>
-          <span>Current deployment + recorded lifecycle proof</span>
+          <span>Current full lifecycle verified · historical proof retained</span>
         </div>
       </div>
     </footer>
