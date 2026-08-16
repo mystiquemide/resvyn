@@ -73,6 +73,7 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
             "address claimant,bytes32 evidenceHash,uint256 amount,uint8 result,"
             "bytes32 modelVersion,uint64 expiry,uint256 nonce)"
         );
+    bytes32 private constant EMPTY_COMMITMENT_HASH = keccak256("resvyn-empty");
 
     mapping(address => uint256) private _reserveBalance;
     mapping(address => uint256) private _lockedExposure;
@@ -175,8 +176,12 @@ contract WarrantyReserve is EIP712, ReentrancyGuard {
         uint64 expiry
     ) external returns (uint256 coverageId) {
         if (claimant == address(0)) revert InvalidClaimant();
-        if (productHash == bytes32(0)) revert ZeroProductHash();
-        if (receiptHash == bytes32(0)) revert ZeroReceiptHash();
+        if (productHash == bytes32(0) || productHash == EMPTY_COMMITMENT_HASH) {
+            revert ZeroProductHash();
+        }
+        if (receiptHash == bytes32(0) || receiptHash == EMPTY_COMMITMENT_HASH) {
+            revert ZeroReceiptHash();
+        }
         if (maxPayout == 0) revert ZeroMaxPayout();
         if (expiry <= block.timestamp) revert InvalidExpiry();
 
