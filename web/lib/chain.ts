@@ -265,9 +265,9 @@ export const CURRENT_DEPLOYMENT = {
 } as const
 
 /**
- * /app reads the current hardened Mainnet deployment by default. This does NOT
- * enable writes: operational mode still requires the explicit evaluator pin +
- * NEXT_PUBLIC_RESVYN_OPERATIONAL=1 deployment gate below.
+ * /app reads and writes against the current hardened Mainnet deployment by
+ * default. The live on-chain evaluator signer still has to match the current
+ * deployment manifest before any write control becomes available.
  */
 export const APP_CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_RESVYN_ADDRESS ||
   CURRENT_DEPLOYMENT.contract) as `0x${string}`
@@ -329,15 +329,19 @@ export const MAINNET_RPC = "https://rpc.botchain.ai"
  * ------------------------------------------------------------------ */
 
 /**
- * The recorded lifecycle proof instance is ARCHIVED. Its evaluator signer is
- * immutable and no longer in operational use, so no new funded position may be
- * created against it.
+ * The archived proof instance is permanently read-only.
  *
- * Writes are enabled only for a non-proof, manifest-verified deployment when:
- *   - NEXT_PUBLIC_RESVYN_OPERATIONAL is exactly "1", AND
- *   - NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR is pinned, AND
- *   - AppConsole confirms the live on-chain signer matches that pin.
- * Every other configuration renders the app read-only.
+ * The current hardened deployment is operational by default because its
+ * contract and immutable evaluator are part of this checked-in manifest. An
+ * operator can still force it read-only by setting NEXT_PUBLIC_RESVYN_OPERATIONAL=0.
+ *
+ * Any custom non-archived deployment continues to require BOTH:
+ *   - NEXT_PUBLIC_RESVYN_OPERATIONAL=1, AND
+ *   - an explicit NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR pin.
+ *
+ * In every operational case AppConsole independently reads evaluatorSigner()
+ * from chain and enables writes only when that live signer matches the expected
+ * evaluator below.
  */
 export const ARCHIVED_PROOF_ADDRESS = PROOF.contract
 
@@ -345,21 +349,34 @@ export function isArchivedProofInstance(addr: string): boolean {
   return addr.toLowerCase() === ARCHIVED_PROOF_ADDRESS.toLowerCase()
 }
 
+export function isCurrentDeployment(addr: string = APP_CONTRACT_ADDRESS): boolean {
+  return addr.toLowerCase() === CURRENT_DEPLOYMENT.contract.toLowerCase()
+}
+
 export function isOperationalDeployment(addr: string = APP_CONTRACT_ADDRESS): boolean {
+  if (isArchivedProofInstance(addr)) return false
+
+  if (isCurrentDeployment(addr)) {
+    return process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL !== "0"
+  }
+
   return (
-    !isArchivedProofInstance(addr) &&
     process.env.NEXT_PUBLIC_RESVYN_OPERATIONAL === "1" &&
     Boolean(process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR)
   )
 }
 
 /**
- * Client-side evaluator manifest gate. The live contract signer must match the
- * operator-pinned signer before write actions can become available. The server
- * independently performs the authoritative on-chain signer vs
- * RESVYN_EVALUATOR_KEY check before signing any settlement decision.
+ * Client-side evaluator manifest gate. The current deployment falls back to
+ * its checked-in immutable evaluator address. Custom deployments still need
+ * NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR. The live signer must match this value
+ * before AppConsole exposes any write action. The server independently checks
+ * its protected RESVYN_EVALUATOR_KEY against evaluatorSigner() before signing.
  */
-export const EXPECTED_EVALUATOR = process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR?.toLowerCase()
+export const EXPECTED_EVALUATOR = (
+  process.env.NEXT_PUBLIC_RESVYN_EXPECTED_EVALUATOR ||
+  (isCurrentDeployment(APP_CONTRACT_ADDRESS) ? CURRENT_DEPLOYMENT.evaluator : undefined)
+)?.toLowerCase()
 
 export function evaluatorSignerMatches(expected: string | undefined, live: string | undefined): boolean {
   if (!expected) return false
