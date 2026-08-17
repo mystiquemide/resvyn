@@ -28,7 +28,7 @@ export default function ProofPage() {
             The production contract completed <span className="em">the full warranty lifecycle.</span>
           </h1>
           <p className="lead" style={{ marginTop: 16 }}>
-            This is the hardened Resvyn deployment that the live app uses today. A fresh merchant funded a native BOT reserve, issued buyer-bound coverage to a separate buyer, the buyer opened an evidence-bound claim, the durable VPS evaluator authorized a real payout, and the merchant reserve reconciled back to zero.
+            This is the hardened Resvyn deployment powering the live app today. A merchant funded a native BOT reserve, issued buyer-bound coverage, the buyer opened an evidence-bound claim, the Resvyn production evaluator authorized the payout, and the reserve reconciled back to zero after settlement.
           </p>
           <div className="pill" style={{ marginTop: 18, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", color: "var(--color-teal-ink)", background: "color-mix(in srgb, var(--color-teal) 12%, #fff)", borderColor: "color-mix(in srgb, var(--color-teal) 30%, transparent)", fontSize: "0.82rem" }}>
             no funded reserve and no valid coverage
