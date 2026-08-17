@@ -19,11 +19,11 @@ import ReserveMeter from "./ReserveMeter"
 import StatusDot from "./StatusDot"
 import { formatBOT } from "@/lib/format"
 
-/* Amounts mirror the CP-011 Mainnet proof run, to the wei. Simulated only. */
-const DEPOSIT = 5000000000000000n
-const LOCK = 1000000000000000n
-const PAYOUT = 1000000000000000n
-const WITHDRAW = 4000000000000000n
+/* Amounts mirror the current recorded Mainnet proof run, to the wei. Simulated only. */
+const DEPOSIT = 1000000000000000n
+const LOCK = 500000000000000n
+const PAYOUT = 500000000000000n
+const WITHDRAW = 500000000000000n
 
 type Tone = "ok" | "idle" | "pending" | "warn" | "fail"
 type LogEntry = { actor: string; event: string; detail: string; tone: Tone }
@@ -67,12 +67,12 @@ const STEPS: Step[] = [
     actor: "Merchant",
     icon: Landmark,
     title: "Fund the reserve",
-    line: "The merchant deposits 0.005 BOT into their reserve. It sits fully free until any coverage locks against it.",
+    line: "The merchant deposits 0.001 BOT into their reserve. It sits fully free until any coverage locks against it.",
     apply: (s) => ({
       ...s,
       balance: s.balance + DEPOSIT,
       free: s.free + DEPOSIT,
-      log: push(s, { actor: "Merchant", event: "ReserveDeposited", detail: "+0.005 BOT · balance 0.005 · free 0.005", tone: "ok" }),
+      log: push(s, { actor: "Merchant", event: "ReserveDeposited", detail: "+0.001 BOT · balance 0.001 · free 0.001", tone: "ok" }),
     }),
   },
   {
@@ -80,13 +80,13 @@ const STEPS: Step[] = [
     actor: "Merchant",
     icon: FileCheck2,
     title: "Issue coverage",
-    line: "The merchant issues coverage #1 for a buyer and locks its 0.001 BOT maximum payout against the free reserve.",
+    line: "The merchant issues coverage #1 for a buyer and locks its 0.0005 BOT maximum payout against the free reserve.",
     apply: (s) => ({
       ...s,
       locked: s.locked + LOCK,
       free: s.free - LOCK,
       coverage: true,
-      log: push(s, { actor: "Merchant", event: "CoverageIssued #1", detail: "locked 0.001 · free 0.004", tone: "ok" }),
+      log: push(s, { actor: "Merchant", event: "CoverageIssued #1", detail: "locked 0.0005 · free 0.0005", tone: "ok" }),
     }),
   },
   {
@@ -106,10 +106,10 @@ const STEPS: Step[] = [
     actor: "AI evaluator",
     icon: Cpu,
     title: "AI decision, signed",
-    line: "The evaluator reviews the evidence and returns an Approve decision for 0.001 BOT, bound to this exact claim and signed with EIP-712.",
+    line: "The evaluator reviews the evidence and returns an Approve decision for 0.0005 BOT, bound to this exact claim and signed with EIP-712.",
     apply: (s) => ({
       ...s,
-      log: push(s, { actor: "AI evaluator", event: "Decision signed", detail: "Approve · 0.001 BOT · EIP-712 signature", tone: "ok" }),
+      log: push(s, { actor: "AI evaluator", event: "Decision signed", detail: "Approve · 0.0005 BOT · EIP-712 signature", tone: "ok" }),
     }),
   },
   {
@@ -117,14 +117,14 @@ const STEPS: Step[] = [
     actor: "Contract",
     icon: ShieldCheck,
     title: "Verify and pay",
-    line: "The contract recovers the signer from the signature, confirms it matches the evaluator key fixed at deployment, and pays 0.001 BOT to the buyer.",
+    line: "The contract recovers the signer from the signature, confirms it matches the evaluator key fixed at deployment, and pays 0.0005 BOT to the buyer.",
     apply: (s) => ({
       ...s,
       balance: s.balance - PAYOUT,
       locked: s.locked - PAYOUT,
       buyerReceived: s.buyerReceived + PAYOUT,
       claim: "approved",
-      log: push(s, { actor: "Contract", event: "ClaimPaid", detail: "0.001 to buyer · balance 0.004 · locked 0", tone: "ok" }),
+      log: push(s, { actor: "Contract", event: "ClaimPaid", detail: "0.0005 to buyer · balance 0.0005 · locked 0", tone: "ok" }),
     }),
   },
   {
@@ -132,13 +132,13 @@ const STEPS: Step[] = [
     actor: "Merchant",
     icon: Store,
     title: "Withdraw free reserve",
-    line: "With the claim settled, the merchant withdraws the remaining 0.004 BOT free reserve. The reserve reconciles to zero.",
+    line: "With the claim settled, the merchant withdraws the remaining 0.0005 BOT free reserve. The reserve reconciles to zero.",
     apply: (s) => ({
       ...s,
       balance: s.balance - WITHDRAW,
       free: s.free - WITHDRAW,
       withdrawn: s.withdrawn + WITHDRAW,
-      log: push(s, { actor: "Merchant", event: "ReserveWithdrawn", detail: "0.004 reclaimed · reserve 0 / 0 / 0", tone: "ok" }),
+      log: push(s, { actor: "Merchant", event: "ReserveWithdrawn", detail: "0.0005 reclaimed · reserve 0 / 0 / 0", tone: "ok" }),
     }),
   },
   {
@@ -159,10 +159,10 @@ const STEPS: Step[] = [
     icon: ShieldAlert,
     title: "Guardrail: over-cap blocked",
     guardrail: true,
-    line: "The merchant tries to issue new coverage for 0.001 BOT while the free reserve is 0. The contract rejects it, so exposure can never exceed the money behind it.",
+    line: "The merchant tries to issue new coverage for 0.0005 BOT while the free reserve is 0. The contract rejects it, so exposure can never exceed the money behind it.",
     apply: (s) => ({
       ...s,
-      log: push(s, { actor: "Contract", event: "Rejected · InsufficientFreeReserve", detail: "free 0 < requested 0.001", tone: "fail" }),
+      log: push(s, { actor: "Contract", event: "Rejected · InsufficientFreeReserve", detail: "free 0 < requested 0.0005", tone: "fail" }),
     }),
   },
 ]
@@ -443,7 +443,7 @@ function Chip({ label, value, tone }: { label: string; value: string; tone: Tone
 function DecisionCard() {
   const rows: [string, string][] = [
     ["result", "Approve"],
-    ["amount", "0.001 BOT"],
+    ["amount", "0.0005 BOT"],
     ["claimId", "1"],
     ["coverageId", "1"],
     ["modelVersion", "resvyn-groq-openai/gpt-oss-120b"],
